@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
@@ -30,3 +31,11 @@ class Config:
     ADMIN_PATH = env_or('ADMIN_PATH', '/admin')
     ADMIN_KEY = env_or('ADMIN_KEY', 'fundar-admin-2026')
     ADMIN_SESSION_MINUTES = int(env_or('ADMIN_SESSION_MINUTES', '30'))
+
+    # ── SESSION PERSISTENCE ──
+    # Users stay logged in for 365 days after their last visit,
+    # even if they fully close the browser.
+    PERMANENT_SESSION_LIFETIME = timedelta(days=365)
+    SESSION_COOKIE_HTTPONLY = True        # JS cannot read the cookie (XSS protection)
+    SESSION_COOKIE_SAMESITE = 'Lax'       # blocks cross-site form POSTs
+    SESSION_COOKIE_SECURE = True        # uncomment ONLY if served over HTTPS

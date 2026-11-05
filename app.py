@@ -42,7 +42,28 @@ if FLW_SECRET_KEY:
 else:
     print('⚠ FLW_SECRET_KEY not set — marketplace checkout disabled')
 
-socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
+socketio = SocketIO(
+    app,
+    cors_allowed_origins='*',
+    async_mode='threading',
+    ping_interval=10,
+    ping_timeout=20,
+    max_http_buffer_size=1_000_000,
+)
+
+
+import logging
+
+class _DropDisconnectedSession(logging.Filter):
+    def filter(self, record):
+        try:
+            return 'Session is disconnected' not in record.getMessage()
+        except Exception:
+            return True
+
+for _name in ('gunicorn.error', 'gunicorn.access',
+              'engineio', 'socketio', 'werkzeug'):
+    logging.getLogger(_name).addFilter(_DropDisconnectedSession())
 
 
 # ─────────────────────────────────────────────
@@ -230,6 +251,7 @@ def signup():
         db.session.add(user)
         db.session.commit()
         session['user_id'] = user.id
+        session.permanent = True   
         return redirect(url_for('verify'))
 
     return render_template('signup.html', form={})
@@ -245,6 +267,7 @@ def login():
             flash('Invalid email or password', 'error')
             return render_template('login.html')
         session['user_id'] = u.id
+        session.permanent = True  
         return redirect(url_for('index'))
     return render_template('login.html')
 
