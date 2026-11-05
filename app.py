@@ -67,7 +67,7 @@ def get_ad_price(days):
 def generate_ref(prefix):
     u = current_user()
     uid = u.id if u else 0
-    return f'FUNDAR-{prefix}-{uid}-{int(datetime.utcnow().timestamp())}'
+    return f'KAMUPUS-{prefix}-{uid}-{int(datetime.utcnow().timestamp())}'
 
 
 # ─────────────────────────────────────────────
@@ -490,33 +490,6 @@ def uploaded_file(filename):
 
 
 # ─────────────────────────────────────────────
-# PWA
-# ─────────────────────────────────────────────
-@app.route('/manifest.json')
-def pwa_manifest():
-    response = send_from_directory('static', 'manifest.json', mimetype='application/manifest+json')
-    response.headers['Cache-Control'] = 'public, max-age=3600'
-    return response
-
-
-@app.route('/sw.js')
-def pwa_service_worker():
-    response = send_from_directory('static', 'sw.js', mimetype='application/javascript')
-    response.headers['Service-Worker-Allowed'] = '/'
-    response.headers['Cache-Control'] = 'no-cache'
-    return response
-
-
-@app.route('/.well-known/assetlinks.json')
-def assetlinks():
-    path = os.path.join(app.root_path, '.well-known', 'assetlinks.json')
-    if not os.path.exists(path):
-        return jsonify([]), 404
-    return send_from_directory(os.path.join(app.root_path, '.well-known'),
-                               'assetlinks.json', mimetype='application/json')
-
-
-# ─────────────────────────────────────────────
 # MARKETPLACE
 # ─────────────────────────────────────────────
 @app.route('/market')
@@ -648,7 +621,7 @@ def buy_listing(listing_id):
                     'name': buyer.full_name,
                 },
                 'customizations': {
-                    'title': 'FUNDAR Marketplace',
+                    'title': 'KAMUPUS Marketplace',
                     'description': f'Payment for: {listing.title}',
                 },
                 'meta': {
@@ -1706,7 +1679,7 @@ with app.app_context():
             print(f'✓ Admin credentials updated: {admin_email}')
         else:
             db.session.add(User(
-                full_name='FUNDAR Admin', email=admin_email, phone='',
+                full_name='KAMUPUS Admin', email=admin_email, phone='',
                 password_hash=generate_password_hash(admin_pass),
                 role='admin', verification_status='verified', avatar_seed='admin'
             ))
