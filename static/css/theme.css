@@ -1106,3 +1106,29 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 }
 .listing-promote-btn:hover { transform: scale(1.02); }
 }
+/* Hide text longer than 5 lines by default */
+.post-body {
+  display: -webkit-box;
+  -webkit-line-clamp: 5; 
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: background 0.2s;
+  padding: 4px;
+  margin: 8px -4px;
+}
+
+/* Show full text when the 'expanded' class is added */
+.post-body.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
+/* Nice hover effect so users know they can click it */
+.post-body:hover {
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+}

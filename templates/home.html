@@ -152,7 +152,6 @@
       class="composer"
       id="composer"
       placeholder="What's happening on campus?"
-      maxlength="500"
     ></textarea>
 
     <div class="composer-preview hidden" id="composerPreview">
@@ -236,6 +235,10 @@
     <div class="search-overlay-results" id="searchResults">
       <div class="search-tip">Try typing a name, a topic, a course code…</div>
     </div>
+    <!-- Full Screen Image Viewer -->
+<div id="imageLightbox" style="display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.95); backdrop-filter: blur(5px); align-items: center; justify-content: center; cursor: zoom-out;">
+    <img id="lightboxImg" src="" alt="" style="max-width: 100vw; max-height: 100vh; object-fit: contain;">
+</div>
 
   </div>
 </div>

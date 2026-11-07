@@ -145,6 +145,21 @@ function postHtml(p) {
 }
 
 feedEl.addEventListener('click', async function(e) {
+  const clickedImg = e.target.closest('.post-img');
+  if (clickedImg) {
+    const lightbox = document.getElementById('imageLightbox');
+    const lightboxImg = document.getElementById('lightboxImg');
+    lightboxImg.src = clickedImg.src; // Copy the image URL
+    lightbox.style.display = 'flex';  // Show the viewer
+    document.body.style.overflow = 'hidden'; // Stop background scrolling
+    return; // Stop here so it doesn't trigger other clicks
+  }
+  
+  const postBody = e.target.closest('.post-body');
+  if (postBody) {
+    postBody.classList.toggle('expanded'); // Expands or shrinks on tap
+    return; // Stop here so it doesn't trigger likes/comments
+  }
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const card = btn.closest('.post');
@@ -542,6 +557,16 @@ document.addEventListener('keydown', function(e) {
   if (modalBackEl && modalBackEl.classList.contains('open')) closeComposer();
   if (searchOverlay && searchOverlay.classList.contains('open')) closeSearch();
 });
+
+// Close the full screen image when clicked
+const lightbox = document.getElementById('imageLightbox');
+if (lightbox) {
+    lightbox.addEventListener('click', function() {
+        this.style.display = 'none';
+        document.getElementById('lightboxImg').src = '';
+        document.body.style.overflow = ''; // Bring back scrolling
+    });
+}
 
 loadFeed();
 })();
