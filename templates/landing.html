@@ -1,0 +1,709 @@
+{% extends "base.html" %}
+{% block title %}KAMUPUS — The app for Lead City students{% endblock %}
+
+{% block content %}
+<style>
+  body { background: #0a0a0a; color: #fff; font-family: 'Plus Jakarta Sans', sans-serif; overflow-x: hidden; }
+  .landing { min-height: 100vh; position: relative; }
+
+  /* ═══ AMBIENT GLOW ═══ */
+  .glow {
+    position: fixed; border-radius: 50%; filter: blur(140px);
+    pointer-events: none; z-index: 0;
+  }
+  .glow-1 { width: 600px; height: 600px; background: rgba(251,191,36,0.15); top: -200px; left: 50%; transform: translateX(-50%); }
+  .glow-2 { width: 500px; height: 500px; background: rgba(236,72,153,0.08); bottom: 20%; right: -150px; }
+
+  main { position: relative; z-index: 1; }
+
+  /* ═══ NAV ═══ */
+  .nav {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: calc(20px + env(safe-area-inset-top, 0px)) 24px;
+    max-width: 1200px; margin: 0 auto;
+  }
+  .logo {
+    font-family: 'Fraunces', serif; font-size: 24px; font-weight: 800;
+    letter-spacing: -0.6px; color: #fbbf24; text-decoration: none;
+  }
+  .nav-actions { display: flex; gap: 8px; align-items: center; }
+  .nav-link {
+    padding: 10px 16px; border-radius: 10px; font-size: 13px; font-weight: 700;
+    text-decoration: none; color: #a1a1aa; transition: all 0.15s;
+  }
+  .nav-link:hover { color: #fff; }
+  .nav-cta {
+    padding: 10px 18px; border-radius: 10px;
+    background: #fbbf24; color: #0a0a0a;
+    font-size: 13px; font-weight: 800; text-decoration: none;
+    transition: all 0.15s;
+  }
+  .nav-cta:hover { background: #fcd34d; }
+
+  /* ═══ HERO ═══ */
+  .hero {
+    max-width: 1200px; margin: 0 auto;
+    padding: 60px 24px 100px;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 60px;
+    align-items: center;
+  }
+
+  @media (max-width: 900px) {
+    .hero {
+      grid-template-columns: 1fr;
+      text-align: center;
+      padding: 40px 20px 60px;
+      gap: 48px;
+    }
+  }
+
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    background: rgba(34,197,94,0.08);
+    border: 1px solid rgba(34,197,94,0.25);
+    border-radius: 999px;
+    font-size: 12px; font-weight: 700; color: #22c55e;
+    margin-bottom: 28px;
+  }
+  .hero-badge::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34,197,94,0.6);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+    70% { box-shadow: 0 0 0 10px rgba(34,197,94,0); }
+    100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+  }
+
+  .hero-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(44px, 7vw, 76px);
+    font-weight: 700; line-height: 0.98;
+    letter-spacing: -0.035em;
+    margin: 0 0 24px;
+    color: #fff;
+  }
+  .hero-title .gold {
+    background: linear-gradient(135deg, #fbbf24 0%, #f97316 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-style: italic;
+  }
+
+  .hero-sub {
+    font-size: clamp(16px, 1.8vw, 19px);
+    line-height: 1.55;
+    color: #a1a1aa;
+    margin: 0 0 32px;
+    max-width: 500px;
+  }
+  @media (max-width: 900px) {
+    .hero-sub { margin-left: auto; margin-right: auto; }
+  }
+  .hero-sub strong { color: #fff; font-weight: 700; }
+
+  .hero-ctas {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  @media (max-width: 900px) {
+    .hero-ctas { justify-content: center; }
+  }
+
+  .cta-primary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 16px 32px; border-radius: 14px;
+    background: #fbbf24; color: #0a0a0a;
+    font-size: 15px; font-weight: 800; text-decoration: none;
+    box-shadow: 0 12px 32px rgba(251,191,36,0.35);
+    transition: all 0.2s;
+    letter-spacing: -0.2px;
+  }
+  .cta-primary:hover {
+    background: #fcd34d;
+    transform: translateY(-2px);
+    box-shadow: 0 16px 40px rgba(251,191,36,0.45);
+  }
+
+  .cta-secondary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 16px 28px; border-radius: 14px;
+    background: transparent; color: #fff;
+    border: 1.5px solid rgba(255,255,255,0.18);
+    font-size: 15px; font-weight: 700; text-decoration: none;
+    transition: all 0.2s;
+  }
+  .cta-secondary:hover {
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(255,255,255,0.35);
+  }
+
+  .trust-row {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    font-size: 13px; color: #71717a; font-weight: 600;
+  }
+  @media (max-width: 900px) {
+    .trust-row { justify-content: center; }
+  }
+  .trust-row span { display: flex; align-items: center; gap: 6px; }
+
+  /* ═══ PHONE MOCKUP ═══ */
+  .phone-wrap {
+    display: flex; justify-content: center;
+    position: relative;
+  }
+  .phone {
+    width: 300px; height: 620px;
+    background: #1a1a1a;
+    border-radius: 44px;
+    padding: 10px;
+    box-shadow:
+      0 60px 100px -20px rgba(251,191,36,0.25),
+      0 30px 60px -10px rgba(0,0,0,0.8),
+      inset 0 0 0 1px rgba(255,255,255,0.08);
+    position: relative;
+    transform: rotate(-3deg);
+    animation: float 6s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: rotate(-3deg) translateY(0); }
+    50% { transform: rotate(-3deg) translateY(-12px); }
+  }
+  .phone::before {
+    content: ''; position: absolute; top: 18px; left: 50%;
+    transform: translateX(-50%);
+    width: 100px; height: 24px;
+    background: #0a0a0a; border-radius: 20px;
+    z-index: 2;
+  }
+  .phone-screen {
+    width: 100%; height: 100%;
+    background: #0a0a0a;
+    border-radius: 36px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    padding-top: 40px;
+  }
+
+  .app-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .app-logo {
+    font-family: 'Fraunces', serif; font-size: 16px; font-weight: 800;
+    color: #fbbf24; letter-spacing: -0.3px;
+  }
+  .app-online {
+    font-size: 10px; font-weight: 700; color: #22c55e;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .app-online::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: #22c55e;
+  }
+
+  .app-feed {
+    flex: 1; overflow: hidden;
+    padding: 12px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+
+  .app-post {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 12px;
+    animation: slideIn 0.6s ease-out backwards;
+  }
+  .app-post:nth-child(1) { animation-delay: 0.3s; }
+  .app-post:nth-child(2) { animation-delay: 0.6s; }
+  .app-post:nth-child(3) { animation-delay: 0.9s; }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .app-post-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .app-avatar {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: linear-gradient(135deg, #fbbf24, #f97316);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 800; color: #0a0a0a;
+    flex-shrink: 0;
+  }
+  .app-avatar.anon { background: linear-gradient(135deg, #52525b, #3f3f46); color: #d4d4d8; }
+  .app-author {
+    font-size: 11px; font-weight: 700; color: #fff;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .app-author-tag {
+    font-size: 8px; font-weight: 700;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(34,197,94,0.15); color: #22c55e;
+  }
+  .app-time { font-size: 9px; color: #52525b; margin-left: auto; }
+
+  .app-content {
+    font-size: 11px; line-height: 1.5; color: #d4d4d8;
+    margin: 0 0 8px;
+  }
+  .app-content strong { color: #fbbf24; font-weight: 700; }
+
+  .app-actions {
+    display: flex; gap: 12px;
+    font-size: 10px; color: #71717a; font-weight: 600;
+  }
+  .app-actions span { display: flex; align-items: center; gap: 3px; }
+
+  .app-listing {
+    background: rgba(251,191,36,0.05);
+    border: 1px solid rgba(251,191,36,0.15);
+    border-radius: 12px;
+    padding: 12px;
+    animation: slideIn 0.6s ease-out 0.9s backwards;
+  }
+  .app-listing-label {
+    font-size: 8px; font-weight: 800; color: #fbbf24;
+    letter-spacing: 1px; text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .app-listing-title {
+    font-size: 12px; font-weight: 800; color: #fff;
+    margin-bottom: 2px;
+  }
+  .app-listing-price {
+    font-size: 14px; font-weight: 800; color: #fbbf24;
+    font-family: 'Fraunces', serif;
+  }
+
+  .app-nav {
+    display: flex; justify-content: space-around;
+    padding: 10px 16px 24px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    font-size: 18px;
+  }
+  .app-nav span { opacity: 0.4; }
+  .app-nav span.active { opacity: 1; }
+
+  /* ═══ TRUST STRIP ═══ */
+  .trust-strip {
+    max-width: 1200px; margin: 0 auto;
+    padding: 24px;
+    display: flex; justify-content: center; flex-wrap: wrap;
+    gap: 40px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .trust-item {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; font-weight: 600; color: #a1a1aa;
+  }
+  .trust-item::before {
+    content: '✓';
+    width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(34,197,94,0.15); color: #22c55e;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800;
+  }
+
+  /* ═══ SECTION ═══ */
+  .section {
+    max-width: 1100px; margin: 0 auto;
+    padding: 100px 24px;
+  }
+  .section-head {
+    text-align: center;
+    max-width: 640px; margin: 0 auto 56px;
+  }
+  .section-eyebrow {
+    display: inline-block;
+    font-size: 12px; font-weight: 800; color: #fbbf24;
+    letter-spacing: 1.5px; text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(30px, 4.5vw, 48px);
+    font-weight: 700; line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin: 0 0 16px;
+    color: #fff;
+  }
+  .section-sub {
+    font-size: 16px; line-height: 1.6;
+    color: #a1a1aa; margin: 0;
+  }
+
+  /* ═══ FEATURE CARDS ═══ */
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .feature {
+    padding: 28px 24px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    transition: all 0.2s;
+  }
+  .feature:hover {
+    border-color: rgba(251,191,36,0.3);
+    background: rgba(255,255,255,0.05);
+    transform: translateY(-2px);
+  }
+  .feature-icon {
+    width: 48px; height: 48px; border-radius: 12px;
+    background: rgba(251,191,36,0.1);
+    border: 1px solid rgba(251,191,36,0.2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    margin-bottom: 16px;
+  }
+  .feature h3 {
+    font-size: 17px; font-weight: 800;
+    margin: 0 0 8px; color: #fff;
+    letter-spacing: -0.2px;
+  }
+  .feature p {
+    font-size: 14px; line-height: 1.6;
+    color: #a1a1aa; margin: 0;
+  }
+
+  /* ═══ STEPS ═══ */
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 20px;
+    position: relative;
+  }
+  .step {
+    padding: 32px 24px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    text-align: center;
+  }
+  .step-num {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #fbbf24, #f97316);
+    color: #0a0a0a;
+    font-family: 'Fraunces', serif;
+    font-size: 22px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 16px;
+    box-shadow: 0 8px 20px rgba(251,191,36,0.3);
+  }
+  .step h3 {
+    font-size: 16px; font-weight: 800;
+    margin: 0 0 8px; color: #fff;
+  }
+  .step p {
+    font-size: 14px; line-height: 1.5;
+    color: #a1a1aa; margin: 0;
+  }
+
+  /* ═══ FINAL CTA ═══ */
+  .final {
+    max-width: 900px; margin: 0 auto;
+    padding: 100px 24px;
+    text-align: center;
+  }
+  .final-card {
+    padding: 80px 32px;
+    background: linear-gradient(135deg, rgba(251,191,36,0.12) 0%, rgba(249,115,22,0.05) 100%);
+    border: 1px solid rgba(251,191,36,0.25);
+    border-radius: 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .final-card::before {
+    content: ''; position: absolute;
+    top: -100%; left: -100%;
+    width: 300%; height: 300%;
+    background: radial-gradient(circle, rgba(251,191,36,0.2) 0%, transparent 50%);
+    animation: shimmer 8s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0%, 100% { transform: translate(0, 0); }
+    50% { transform: translate(30%, 30%); }
+  }
+  .final-card > * { position: relative; z-index: 1; }
+
+  .final-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(32px, 5vw, 52px);
+    font-weight: 700; line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin: 0 0 16px;
+    color: #fff;
+  }
+  .final-title .gold {
+    background: linear-gradient(135deg, #fbbf24 0%, #f97316 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-style: italic;
+  }
+  .final-sub {
+    font-size: 16px; line-height: 1.6;
+    color: #a1a1aa;
+    margin: 0 0 32px;
+    max-width: 460px;
+    margin-left: auto; margin-right: auto;
+  }
+
+  /* ═══ FOOTER ═══ */
+  .footer {
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding: 40px 24px 32px;
+    max-width: 1200px; margin: 0 auto;
+    display: flex; justify-content: space-between;
+    align-items: center; flex-wrap: wrap; gap: 20px;
+    font-size: 13px; color: #52525b;
+  }
+  .footer-brand {
+    font-family: 'Fraunces', serif; font-size: 18px;
+    font-weight: 800; color: #fbbf24;
+  }
+  .footer-links { display: flex; gap: 20px; }
+  .footer-links a {
+    color: #71717a; text-decoration: none;
+    font-weight: 600;
+  }
+  .footer-links a:hover { color: #fff; }
+
+  @media (max-width: 640px) {
+    .phone { width: 260px; height: 540px; transform: rotate(0); }
+    .phone::before { width: 80px; height: 20px; }
+    .section { padding: 64px 20px; }
+    .final { padding: 64px 20px; }
+    .final-card { padding: 56px 20px; border-radius: 24px; }
+    .trust-strip { gap: 20px; padding: 20px; }
+    .footer { justify-content: center; text-align: center; }
+  }
+</style>
+
+<div class="glow glow-1"></div>
+<div class="glow glow-2"></div>
+
+<main class="landing">
+
+  <!-- ═══ NAV ═══ -->
+  <nav class="nav">
+    <a href="/" class="logo">KAMUPUS</a>
+    <div class="nav-actions">
+      <a href="{{ url_for('login') }}" class="nav-link">Sign in</a>
+      <a href="{{ url_for('signup') }}" class="nav-cta">Join free →</a>
+    </div>
+  </nav>
+
+  <!-- ═══ HERO ═══ -->
+  <section class="hero">
+    <div>
+      <div class="hero-badge">Live on LCU campus</div>
+
+      <h1 class="hero-title">
+        LCU, meet<br>
+        <span class="gold">your app.</span>
+      </h1>
+
+      <p class="hero-sub">
+        <strong>The verified social network for Lead City students.</strong>
+        Chat, buy, sell, post gist, find events — all in one place.
+        No outsiders. No scammers. No fakes.
+      </p>
+
+      <div class="hero-ctas">
+        <a href="{{ url_for('signup') }}" class="cta-primary">
+          Join KAMUPUS →
+        </a>
+        <a href="{{ url_for('login') }}" class="cta-secondary">
+          I have an account
+        </a>
+      </div>
+
+      <div class="trust-row">
+        <span>✓ Verified students only</span>
+        <span>✓ Free forever</span>
+        <span>✓ 2-minute signup</span>
+      </div>
+    </div>
+
+    <!-- Phone mockup -->
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="app-header">
+            <div class="app-logo">KAMUPUS</div>
+            <div class="app-online">online</div>
+          </div>
+
+          <div class="app-feed">
+            <div class="app-post">
+              <div class="app-post-head">
+                <div class="app-avatar">T</div>
+                <div class="app-author">
+                  Tunde
+                  <span class="app-author-tag">✓</span>
+                </div>
+                <div class="app-time">2m</div>
+              </div>
+              <p class="app-content">
+                Just sold my old textbook on <strong>KAMUPUS Marketplace</strong>.
+                ₦3,500 in 3 hours. This app is different 🤝
+              </p>
+              <div class="app-actions">
+                <span>❤️ 24</span>
+                <span>💬 8</span>
+              </div>
+            </div>
+
+            <div class="app-post">
+              <div class="app-post-head">
+                <div class="app-avatar anon">?</div>
+                <div class="app-author">Anonymous</div>
+                <div class="app-time">15m</div>
+              </div>
+              <p class="app-content">
+                Anyone know if Dr. Adeyemi is giving a test this week? 😭
+              </p>
+              <div class="app-actions">
+                <span>❤️ 87</span>
+                <span>💬 42</span>
+              </div>
+            </div>
+
+            <div class="app-listing">
+              <div class="app-listing-label">🛍️ Marketplace</div>
+              <div class="app-listing-title">iPhone 11 · 128GB</div>
+              <div class="app-listing-price">₦180,000</div>
+            </div>
+          </div>
+
+          <div class="app-nav">
+            <span class="active">🏠</span>
+            <span>🛍️</span>
+            <span>💬</span>
+            <span>👤</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ TRUST STRIP ═══ -->
+  <div class="trust-strip">
+    <div class="trust-item">Matric-verified students</div>
+    <div class="trust-item">Free forever</div>
+    <div class="trust-item">Built for LCU</div>
+    <div class="trust-item">No outsiders</div>
+  </div>
+
+  <!-- ═══ FEATURES ═══ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="section-eyebrow">What's inside</div>
+      <h2 class="section-title">Everything LCU.<br>One app.</h2>
+      <p class="section-sub">
+        No more juggling five WhatsApp groups, sketchy Telegram sellers, and outdated notice boards.
+      </p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">💬</div>
+        <h3>Chat & DMs</h3>
+        <p>Message any verified student directly. Create group chats with your coursemates. Anonymous mode when you need it.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🛍️</div>
+        <h3>Verified Marketplace</h3>
+        <p>Buy and sell with real students. Every seller is verified. Every deal is legit. No more scam stories.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔥</div>
+        <h3>The Gist</h3>
+        <p>Campus news, hot takes, anonymous confessions. What's happening at LCU, straight from students.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📅</div>
+        <h3>Events & Parties</h3>
+        <p>Know every party, show, and event before it happens. RSVP in one tap. Never miss what's lit.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📚</div>
+        <h3>Assignments</h3>
+        <p>Add your deadlines, upload files, get notified before it's due. Never beg for extra marks again.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🤝</div>
+        <h3>Connect</h3>
+        <p>Find students in your faculty, department, hostel, or level. Build your campus network for life.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ HOW TO JOIN ═══ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="section-eyebrow">How it works</div>
+      <h2 class="section-title">Join in 2 minutes.</h2>
+      <p class="section-sub">No invite code. No waiting list. No fees.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Sign up</h3>
+        <p>Enter your name, email, and password.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Verify you're LCU</h3>
+        <p>Upload your matric number and admission letter. This keeps out non-students.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>You're in</h3>
+        <p>Get approved within a few hours. Then start chatting, buying, and posting.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ FINAL CTA ═══ -->
+  <section class="final">
+    <div class="final-card">
+      <h2 class="final-title">
+        Ready to join<br>
+        <span class="gold">the campus?</span>
+      </h2>
+      <p class="final-sub">
+        Free forever. Verified students only. This is where LCU is.
+      </p>
+      <a href="{{ url_for('signup') }}" class="cta-primary">
+        Join KAMUPUS free →
+      </a>
+    </div>
+  </section>
+
+  <!-- ═══ FOOTER ═══ -->
+  <footer class="footer">
+    <div class="footer-brand">🔥 KAMUPUS</div>
+    <div class="footer-links">
+      <a href="{{ url_for('login') }}">Sign in</a>
+      <a href="{{ url_for('signup') }}">Sign up</a>
+    </div>
+  </footer>
+
+</main>
+{% endblock %}
