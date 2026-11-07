@@ -214,7 +214,7 @@ def is_admin_unlocked():
 def index():
     u = current_user()
     if not u:
-        return redirect(url_for('landing.html'))
+        return render_template('landing.html')       # ← CORRECT
     if u.role == 'admin':
         return redirect(url_for('admin'))
     if u.verification_status == 'verified':
