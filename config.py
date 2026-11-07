@@ -22,7 +22,19 @@ class Config:
     else:
         SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(BASE_DIR, 'fundar.db')
 
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+        SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # ── Connection pool — fixes Neon/Railway "SSL connection closed" errors ──
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,    # test connection before use
+        'pool_recycle': 300,      # refresh every 5 min (Neon's idle timeout)
+        'connect_args': {
+            'keepalives': 1,          # enable TCP keepalives
+            'keepalives_idle': 30,    # send keepalive after 30s of inactivity
+            'keepalives_interval': 5, # retry every 5s if no ack
+            'keepalives_count': 5,    # give up after 5 failed attempts
+        },
+    }
 
     UPLOAD_FOLDER = env_or('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
     MAX_CONTENT_LENGTH = 20 * 1024 * 1024
