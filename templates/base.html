@@ -21,8 +21,55 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,700;9..144,800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/theme.css') }}">
+
+<!-- GLOBAL HEADER STYLES -->
+<style>
+    .global-header {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        padding: 12px 24px;
+        z-index: 1000;
+        background: rgba(10, 10, 10, 0.85);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        display: flex;
+        align-items: center;
+    }
+    .global-logo {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+    }
+    .global-logo img {
+        height: 40px;
+        width: 40px;
+        object-fit: contain;
+        mix-blend-mode: screen; /* Makes the dark JPEG background invisible */
+    }
+    .global-logo span {
+        font-family: 'Fraunces', serif;
+        font-size: 22px;
+        font-weight: 800;
+        color: #fff;
+        letter-spacing: -0.5px;
+    }
+    /* Add padding to the body so content doesn't hide under the fixed header */
+    body {
+        padding-top: 64px; 
+    }
+</style>
 </head>
 <body>
+
+<!-- GLOBAL LOGO HEADER -->
+<header class="global-header">
+    <a href="/" class="global-logo">
+        <img src="{{ url_for('static', filename='logo.jpeg') }}" alt="KAMUPUS Logo">
+        <span>KAMUPUS</span>
+    </a>
+</header>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% if messages %}
