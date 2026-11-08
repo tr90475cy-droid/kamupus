@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 import requests
 from datetime import datetime, timedelta
 from functools import wraps
@@ -42,6 +43,9 @@ if FLW_SECRET_KEY:
 else:
     print('⚠ FLW_SECRET_KEY not set — marketplace checkout disabled')
 
+# ─────────────────────────────────────────────
+# SOCKET.IO
+# ─────────────────────────────────────────────
 socketio = SocketIO(
     app,
     cors_allowed_origins='*',
@@ -51,7 +55,9 @@ socketio = SocketIO(
     max_http_buffer_size=1_000_000,
 )
 
-
+# ─────────────────────────────────────────────
+# SILENCE SOCKET.IO NOISE
+# ─────────────────────────────────────────────
 import logging
 
 class _DropDisconnectedSession(logging.Filter):
@@ -65,6 +71,25 @@ for _name in ('gunicorn.error', 'gunicorn.access',
               'engineio', 'socketio', 'werkzeug'):
     logging.getLogger(_name).addFilter(_DropDisconnectedSession())
 
+# ─────────────────────────────────────────────
+# SUPABASE STORAGE
+# ─────────────────────────────────────────────
+from supabase import create_client
+
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'kamupus-uploads')
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print('✓ Supabase storage configured')
+    except Exception as e:
+        print(f'⚠ Supabase init failed: {e}')
+        supabase = None
+else:
+    supabase = None
+    print('⚠ Supabase storage not configured — ALL uploads will be rejected')
 
 # ─────────────────────────────────────────────
 # AD PRICING
@@ -121,9 +146,12 @@ def current_user():
 def user_avatar(user):
     if not user:
         return None
-    if getattr(user, 'profile_picture_path', None):
-        return url_for('uploaded_file', filename=user.profile_picture_path)
-    return None
+    path = getattr(user, 'profile_picture_path', None)
+    if not path:
+        return None
+    if path.startswith('http'):
+        return path
+    return url_for('uploaded_file', filename=path)
 
 
 def login_required(f):
@@ -148,10 +176,51 @@ def verified_required(f):
 
 
 def save_upload(file, prefix):
-    filename = secure_filename(f"{prefix}_{int(datetime.utcnow().timestamp())}_{file.filename}")
-    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(path)
-    return filename
+    """Upload a file to Supabase Storage. Returns the public URL, or None on failure.
+    NEVER falls back to local disk."""
+    if not supabase:
+        print('[UPLOAD] Supabase not configured — upload rejected')
+        return None
+
+    content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
+    ext = os.path.splitext(file.filename or '')[1].lower() or '.bin'
+    unique_name = f"{prefix}/{uuid.uuid4().hex}{ext}"
+
+    try:
+        file_bytes = file.read()
+    except Exception as e:
+        print(f'[UPLOAD] Could not read file: {e}')
+        return None
+
+    try:
+        res = supabase.storage.from_(SUPABASE_BUCKET).upload(
+            path=unique_name,
+            file=file_bytes,
+            file_options={'content-type': content_type, 'upsert': 'false'},
+        )
+        if hasattr(res, 'error') and res.error:
+            print(f'[SUPABASE UPLOAD ERROR] {res.error}')
+            return None
+        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
+    except Exception as e:
+        print(f'[SUPABASE UPLOAD EXCEPTION] {e}')
+        return None
+
+
+def delete_upload(path):
+    """Delete a file from Supabase Storage. Ignores legacy local paths."""
+    if not path or not supabase:
+        return
+    if not isinstance(path, str) or not path.startswith('http'):
+        # Legacy local filename — nothing to delete on Supabase side
+        return
+    try:
+        marker = f'/public/{SUPABASE_BUCKET}/'
+        if marker in path:
+            key = path.split(marker, 1)[1]
+            supabase.storage.from_(SUPABASE_BUCKET).remove([key])
+    except Exception as e:
+        print(f'[SUPABASE DELETE ERROR] {e}')
 
 
 def time_ago(dt):
@@ -214,7 +283,7 @@ def is_admin_unlocked():
 def index():
     u = current_user()
     if not u:
-        return render_template('landing.html')       # ← CORRECT
+        return render_template('landing.html')
     if u.role == 'admin':
         return redirect(url_for('admin'))
     if u.verification_status == 'verified':
@@ -251,7 +320,7 @@ def signup():
         db.session.add(user)
         db.session.commit()
         session['user_id'] = user.id
-        session.permanent = True   
+        session.permanent = True
         return redirect(url_for('verify'))
 
     return render_template('signup.html', form={})
@@ -267,7 +336,7 @@ def login():
             flash('Invalid email or password', 'error')
             return render_template('login.html')
         session['user_id'] = u.id
-        session.permanent = True  
+        session.permanent = True
         return redirect(url_for('index'))
     return render_template('login.html')
 
@@ -319,27 +388,52 @@ def verify():
             flash('This matric number is already registered', 'error')
             return render_template('verify.html', form=request.form)
 
-        filename = save_upload(file, f'u{u.id}')
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        score, flags = analyze_image(filepath)
+        # AI check needs a real file path — write to temp, run check, delete immediately
+        # (this is NOT storage fallback, just a temp file for image analysis)
+        file_bytes = file.read()
+        local_name = secure_filename(f"verify_{u.id}_{int(datetime.utcnow().timestamp())}_{file.filename}")
+        local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_name)
+
+        try:
+            with open(local_path, 'wb') as fh:
+                fh.write(file_bytes)
+            score, flags = analyze_image(local_path)
+        finally:
+            try: os.remove(local_path)
+            except OSError: pass
 
         if score >= 75:
-            try: os.remove(filepath)
-            except OSError: pass
             flash(f'Upload rejected — appears AI-generated ({int(score)}%). Please upload a real photo.', 'error')
             return render_template('verify.html', form=request.form)
 
+        # Upload to Supabase using a temp wrapper
+        class _TmpFile:
+            def __init__(self, filename, content_type, data):
+                self.filename = filename
+                self.content_type = content_type
+                self._data = data
+                self._read = False
+            def read(self):
+                if self._read:
+                    return b''
+                self._read = True
+                return self._data
+
+        tmp = _TmpFile(file.filename, file.content_type, file_bytes)
+        file_url = save_upload(tmp, f'verify{u.id}')
+
+        if not file_url:
+            flash('Upload failed — please try again', 'error')
+            return render_template('verify.html', form=request.form)
+
         if existing and existing.user_id == u.id:
-            old = os.path.join(app.config['UPLOAD_FOLDER'], existing.admission_letter_path or '')
-            if existing.admission_letter_path and os.path.exists(old):
-                try: os.remove(old)
-                except OSError: pass
+            delete_upload(existing.admission_letter_path)
             db.session.delete(existing)
             db.session.commit()
 
         v = StudentVerification(user_id=u.id, matric_no=matric, faculty=faculty,
                                 department=department, level=level, admission_year=year,
-                                admission_letter_path=filename, status='pending',
+                                admission_letter_path=file_url, status='pending',
                                 ai_score=score, ai_flags=json.dumps(flags))
         db.session.add(v)
         u.verification_status = 'pending'
@@ -384,7 +478,7 @@ def serialize_post(p, me_id):
         'id': p.id, 'user_id': user_id, 'author': author, 'avatar': avatar,
         'anonymous': p.anonymous, 'verified': not p.anonymous,
         'time': time_ago(p.created_at), 'tag': p.tag, 'content': p.content,
-        'image': url_for('uploaded_file', filename=p.image_path) if p.image_path else None,
+        'image': p.image_path if p.image_path else None,
         'likes': len(p.likes), 'comments': len(p.comments), 'liked': liked,
     }
 
@@ -452,6 +546,8 @@ def api_create_post():
         image_path = None
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'post{current_user().id}')
+            if not image_path:
+                return jsonify({'error': 'Image upload failed'}), 500
     else:
         d = request.get_json() or {}
         content = (d.get('content') or '').strip()
@@ -532,7 +628,7 @@ def serialize_listing(l, me_id):
     return {
         'id': l.id, 'title': l.title, 'description': l.description,
         'price': l.price, 'category': l.category,
-        'image': url_for('uploaded_file', filename=l.image_path) if l.image_path else None,
+        'image': l.image_path if l.image_path else None,
         'sold': l.sold,
         'seller': seller.full_name, 'seller_id': seller.id,
         'seller_verified': seller.verification_status == 'verified',
@@ -568,6 +664,8 @@ def api_listings():
         image_path = None
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'list{me.id}')
+            if not image_path:
+                return jsonify({'error': 'Image upload failed'}), 500
 
         listing = Listing(user_id=me.id, title=title, description=description,
                           price=price, category=category, image_path=image_path)
@@ -879,6 +977,8 @@ def api_assignments():
                 return jsonify({'error': 'File type not allowed'}), 400
             attachment_name = file.filename
             attachment_path = save_upload(file, f'assign{me.id}')
+            if not attachment_path:
+                return jsonify({'error': 'File upload failed'}), 500
 
         a = Assignment(user_id=me.id, course_code=course_code, course_title=course_title,
                        title=title, description=description, due_date=due_date,
@@ -907,7 +1007,7 @@ def serialize_assignment(a):
         'due_date': a.due_date.isoformat(),
         'due_label': a.due_date.strftime('%b %d, %I:%M %p'),
         'completed': a.completed, 'urgency': urgency,
-        'attachment_url': url_for('uploaded_file', filename=a.attachment_path) if a.attachment_path else None,
+        'attachment_url': a.attachment_path if a.attachment_path else None,
         'attachment_name': a.attachment_name,
         'has_image': bool(a.attachment_path and a.attachment_path.lower().rsplit('.', 1)[-1] in {'png', 'jpg', 'jpeg', 'webp'}),
     }
@@ -929,10 +1029,7 @@ def api_assignment_delete(aid):
     a = Assignment.query.get_or_404(aid)
     if a.user_id != current_user().id: abort(403)
     if a.attachment_path:
-        fp = os.path.join(app.config['UPLOAD_FOLDER'], a.attachment_path)
-        if os.path.exists(fp):
-            try: os.remove(fp)
-            except OSError: pass
+        delete_upload(a.attachment_path)
     db.session.delete(a)
     db.session.commit()
     return jsonify({'ok': True})
@@ -969,6 +1066,8 @@ def api_events():
         image_path = None
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'event{me.id}')
+            if not image_path:
+                return jsonify({'error': 'Image upload failed'}), 500
 
         e = Event(user_id=me.id, title=title, description=description,
                   venue=venue, starts_at=starts_at, image_path=image_path)
@@ -986,7 +1085,7 @@ def serialize_event(e, me_id):
         'id': e.id, 'title': e.title, 'description': e.description, 'venue': e.venue,
         'starts_at': e.starts_at.isoformat(),
         'starts_label': e.starts_at.strftime('%a, %b %d · %I:%M %p'),
-        'image': url_for('uploaded_file', filename=e.image_path) if e.image_path else None,
+        'image': e.image_path if e.image_path else None,
         'host': e.host.full_name, 'host_id': e.host.id,
         'rsvp_count': len(e.rsvps), 'going': going, 'mine': e.user_id == me_id,
     }
@@ -1224,13 +1323,12 @@ def api_me_picture():
         return jsonify({'error': 'Only PNG, JPG, JPEG, WEBP allowed'}), 400
 
     if u.profile_picture_path:
-        old = os.path.join(app.config['UPLOAD_FOLDER'], u.profile_picture_path)
-        if os.path.exists(old):
-            try: os.remove(old)
-            except OSError: pass
+        delete_upload(u.profile_picture_path)
 
-    filename = save_upload(file, f'avatar{u.id}')
-    u.profile_picture_path = filename
+    file_url = save_upload(file, f'avatar{u.id}')
+    if not file_url:
+        return jsonify({'error': 'Upload failed'}), 500
+    u.profile_picture_path = file_url
     db.session.commit()
     return jsonify({'ok': True, 'avatar': user_avatar(u)})
 
@@ -1240,10 +1338,7 @@ def api_me_picture():
 def api_me_picture_delete():
     u = current_user()
     if u.profile_picture_path:
-        old = os.path.join(app.config['UPLOAD_FOLDER'], u.profile_picture_path)
-        if os.path.exists(old):
-            try: os.remove(old)
-            except OSError: pass
+        delete_upload(u.profile_picture_path)
         u.profile_picture_path = None
         db.session.commit()
     return jsonify({'ok': True})
@@ -1654,11 +1749,7 @@ def api_debug_users():
 with app.app_context():
     db.create_all()
 
-    # ── AUTO-MIGRATE: add columns missing from legacy SQLite DBs ──
-    # create_all() never adds columns to existing tables. If this DB was
-    # created before a column was added to models.py, the next query crashes
-    # with "no such column". Repair the schema on every startup.
-    # No-op on fresh DBs (create_all already built every column).
+    # Auto-migrate: add columns missing from legacy SQLite DBs (no-op for Postgres)
     if app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:///'):
         from sqlalchemy import inspect, text
         insp = inspect(db.engine)
@@ -1720,6 +1811,7 @@ if __name__ == '__main__':
     print(f'  ADMIN LOGIN: /admin-login')
     print(f'  ADMIN EMAIL: {os.environ.get("ADMIN_EMAIL", "oladipobright12@gmail.com")}')
     print(f'  FLW READY  : {"YES" if FLW_SECRET_KEY else "NO"}')
+    print(f'  SUPABASE   : {"YES" if supabase else "NO"}')
     print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
