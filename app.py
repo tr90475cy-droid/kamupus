@@ -1246,7 +1246,7 @@ def api_users_search():
         })
     return jsonify(result)
 
-    @app.route('/api/search')
+@app.route('/api/search')
 @verified_required
 def api_search():
     me = current_user()
