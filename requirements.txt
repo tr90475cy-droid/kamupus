@@ -22,3 +22,4 @@ requests==2.31.0
 
 # Image processing
 Pillow==11.0.0
+supabase==2.7.4
