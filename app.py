@@ -41,13 +41,10 @@ if SUPABASE_URL and SUPABASE_KEY:
         print('✓ Supabase Storage configured')
     except ImportError:
         print('⚠ supabase package not installed — uploads disabled')
-        print('  Fix: add "supabase==2.7.4" to requirements.txt and redeploy')
     except Exception as e:
         print(f'⚠ Supabase init failed: {e}')
 else:
     print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
-    print(f'  SUPABASE_URL set: {bool(SUPABASE_URL)}')
-    print(f'  SUPABASE_SERVICE_KEY set: {bool(SUPABASE_KEY)}')
 
 # ─────────────────────────────────────────────
 # APP SETUP
@@ -177,17 +174,13 @@ def verified_required(f):
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
 def save_upload(file, prefix):
-    """Upload to Supabase. Returns public URL on success, None on failure.
-    Sets _last_upload_error so callers can surface the real reason."""
+    """Upload to Supabase. Returns public URL on success, None on failure."""
     global _last_upload_error
     _last_upload_error = None
 
     if not supabase:
         _last_upload_error = 'Supabase client not initialized'
         print(f'❌ [UPLOAD] {_last_upload_error}')
-        print(f'   SUPABASE_URL set: {bool(SUPABASE_URL)}')
-        print(f'   SUPABASE_SERVICE_KEY set: {bool(SUPABASE_KEY)}')
-        print(f'   → Fix: add supabase to requirements.txt + set env vars on Railway')
         return None
 
     content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
@@ -207,18 +200,13 @@ def save_upload(file, prefix):
         return None
 
     try:
-        res = supabase.storage.from_(SUPABASE_BUCKET).upload(
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
             path=unique_name,
             file=file_bytes,
             file_options={'content-type': content_type, 'upsert': 'false'},
         )
-        if hasattr(res, 'error') and res.error:
-            _last_upload_error = f'Supabase error: {res.error}'
-            print(f'❌ [SUPABASE UPLOAD ERROR] {_last_upload_error}')
-            return None
-
         url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
-        print(f'✓ [UPLOAD] {unique_name} → {url[:60]}...')
+        print(f'✓ [UPLOAD] {unique_name}')
         return url
     except Exception as e:
         _last_upload_error = f'{type(e).__name__}: {e}'
@@ -289,11 +277,26 @@ def is_admin_unlocked():
     return True
 
 # ─────────────────────────────────────────────
-# ROOT
+# ROOT — FIXED: subdomain-aware routing
 # ─────────────────────────────────────────────
 @app.route('/')
 def index():
     u = current_user()
+    host = (request.host or '').split(':')[0].lower()
+
+    # app.kamupus.com → always show app (never marketing)
+    is_app_host = host.startswith('app.')
+
+    if is_app_host:
+        if not u:
+            return redirect(url_for('login'))
+        if u.role == 'admin':
+            return redirect(url_for('admin'))
+        if u.verification_status == 'verified':
+            return redirect(url_for('home'))
+        return redirect(url_for('pending'))
+
+    # kamupus.com (root) → landing for logged-out, app for logged-in
     if not u:
         return render_template('landing.html')
     if u.role == 'admin':
@@ -356,7 +359,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ─────────────────────────────────────────────
-# VERIFICATION
+# VERIFICATION — FIXED: user_id uniqueness + AI-check safety
 # ─────────────────────────────────────────────
 @app.route('/verify', methods=['GET', 'POST'])
 @login_required
@@ -391,8 +394,11 @@ def verify():
             flash('Only PNG, JPG, JPEG, WEBP, or PDF allowed', 'error')
             return render_template('verify.html', form=request.form)
 
-        existing = StudentVerification.query.filter_by(matric_no=matric).first()
-        if existing and existing.user_id != u.id:
+        # FIX #1: check by BOTH matric_no and user_id
+        existing_by_matric = StudentVerification.query.filter_by(matric_no=matric).first()
+        existing_by_user   = StudentVerification.query.filter_by(user_id=u.id).first()
+
+        if existing_by_matric and existing_by_matric.user_id != u.id:
             flash('This matric number is already registered', 'error')
             return render_template('verify.html', form=request.form)
 
@@ -400,10 +406,15 @@ def verify():
         local_name = secure_filename(f"verify_{u.id}_{int(datetime.utcnow().timestamp())}_{file.filename}")
         local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_name)
 
+        # FIX #2: wrap analyze_image in try/except so PDFs can't crash the route
         try:
             with open(local_path, 'wb') as fh:
                 fh.write(file_bytes)
-            score, flags = analyze_image(local_path)
+            try:
+                score, flags = analyze_image(local_path)
+            except Exception as e:
+                print(f'⚠ analyze_image failed: {e}')
+                score, flags = 0, []
         finally:
             try: os.remove(local_path)
             except OSError: pass
@@ -431,9 +442,10 @@ def verify():
             flash(f'Upload failed — {_last_upload_error or "please try again"}', 'error')
             return render_template('verify.html', form=request.form)
 
-        if existing and existing.user_id == u.id:
-            delete_upload(existing.admission_letter_path)
-            db.session.delete(existing)
+        # Delete any prior record for THIS user (regardless of matric_no)
+        if existing_by_user:
+            delete_upload(existing_by_user.admission_letter_path)
+            db.session.delete(existing_by_user)
             db.session.commit()
 
         v = StudentVerification(user_id=u.id, matric_no=matric, faculty=faculty,
@@ -567,36 +579,25 @@ def api_create_post():
     db.session.commit()
     return jsonify(serialize_post(p, current_user().id))
 
-
-# ═════════════════════════════════════════════
-# NEW: DELETE POST (owner or admin)
-# ═════════════════════════════════════════════
+# FIX #4: removed redundant Like/Comment deletes (cascade handles it)
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 @verified_required
 def api_delete_post(pid):
-    """Delete a post, its Supabase image, and its likes/comments.
-    Owner or admin only."""
     me = current_user()
     p = Post.query.get_or_404(pid)
 
     if p.user_id != me.id and me.role != 'admin':
         abort(403)
 
-    # Delete image from Supabase
     if p.image_path:
         delete_upload(p.image_path)
 
-    # Delete likes and comments explicitly (in case cascade isn't configured)
-    Like.query.filter_by(post_id=pid).delete()
-    Comment.query.filter_by(post_id=pid).delete()
-
-    # Delete the post
+    post_owner_id = p.user_id
     db.session.delete(p)
     db.session.commit()
 
-    # Log if admin
-    if me.role == 'admin' and p.user_id != me.id:
-        log_admin_action('post_delete', target_user_id=p.user_id, detail=f'post {pid}')
+    if me.role == 'admin' and post_owner_id != me.id:
+        log_admin_action('post_delete', target_user_id=post_owner_id, detail=f'post {pid}')
 
     return jsonify({'ok': True})
 
@@ -733,7 +734,7 @@ def api_listing_sold(lid):
     return jsonify({'sold': l.sold})
 
 # ─────────────────────────────────────────────
-# FLUTTERWAVE — Marketplace checkout
+# FLUTTERWAVE
 # ─────────────────────────────────────────────
 @app.route('/api/market/buy/<int:listing_id>', methods=['POST'])
 @verified_required
@@ -1037,7 +1038,7 @@ def api_assignment_delete(aid):
     return jsonify({'ok': True})
 
 # ─────────────────────────────────────────────
-# EVENTS / PARTIES
+# EVENTS
 # ─────────────────────────────────────────────
 @app.route('/parties')
 @verified_required
@@ -1131,14 +1132,17 @@ def serialize_room_for(r, me):
         'member_count': len(r.members),
     }
 
+# FIX #3: sort by actual timestamp, not by string like "5m"/"2h"
 @app.route('/api/chat/rooms', methods=['GET'])
 @verified_required
 def api_chat_rooms_list():
     me = current_user()
     rooms = ChatRoom.query.join(ChatMember).filter(ChatMember.user_id == me.id).all()
-    rooms_data = [serialize_room_for(r, me) for r in rooms]
-    rooms_data.sort(key=lambda r: r['last_time'], reverse=True)
-    return jsonify(rooms_data)
+    rooms.sort(
+        key=lambda r: r.messages[-1].created_at if r.messages else datetime.min,
+        reverse=True
+    )
+    return jsonify([serialize_room_for(r, me) for r in rooms])
 
 @app.route('/api/chat/group', methods=['POST'])
 @verified_required
@@ -1687,22 +1691,27 @@ def ws_message(data):
     emit('message', payload, to=f'room_{rid}')
 
 # ─────────────────────────────────────────────
-# DEBUG
+# DEBUG — FIXED: locked down
 # ─────────────────────────────────────────────
 @app.route('/api/debug/users')
 @verified_required
 def api_debug_users():
+    # FIX #5: admin-only, not every verified user
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
     users = User.query.all()
     return jsonify([{
-        'id': u.id, 'name': u.full_name, 'email': u.email,
-        'role': u.role, 'status': u.verification_status,
-        'has_picture': bool(u.profile_picture_path),
-        'whatsapp': getattr(u, 'whatsapp_number', '') or '',
-    } for u in users])
+        'id': u2.id, 'name': u2.full_name, 'email': u2.email,
+        'role': u2.role, 'status': u2.verification_status,
+        'has_picture': bool(u2.profile_picture_path),
+        'whatsapp': getattr(u2, 'whatsapp_number', '') or '',
+    } for u2 in users])
 
 @app.route('/api/debug/supabase')
+@login_required
 def debug_supabase():
-    """Public endpoint — visit in browser to check Supabase status."""
+    # FIX #6: require login (was fully public)
     result = {
         'env_url_set': bool(SUPABASE_URL),
         'env_key_set': bool(SUPABASE_KEY),
@@ -1727,6 +1736,7 @@ def debug_supabase():
 with app.app_context():
     db.create_all()
 
+    # Auto-migrate missing SQLite columns
     if app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:///'):
         from sqlalchemy import inspect, text
         insp = inspect(db.engine)
@@ -1750,6 +1760,20 @@ with app.app_context():
                             f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ}'
                         ))
                         print(f'✓ auto-migrate: {table}.{col}')
+
+    # Verify Supabase bucket exists at startup
+    if supabase:
+        try:
+            buckets = supabase.storage.list_buckets()
+            names = [b.name for b in buckets]
+            if SUPABASE_BUCKET not in names:
+                print(f'⚠ Supabase bucket "{SUPABASE_BUCKET}" not found!')
+                print(f'  Available: {names}')
+                print(f'  → Create it in Supabase dashboard → Storage')
+            else:
+                print(f'✓ Supabase bucket "{SUPABASE_BUCKET}" ready')
+        except Exception as e:
+            print(f'⚠ Could not verify Supabase bucket: {e}')
 
     admin_email = os.environ.get('ADMIN_EMAIL', 'oladipobright12@gmail.com')
     admin_pass = os.environ.get('ADMIN_PASSWORD', 'bright_kelvin*$')
