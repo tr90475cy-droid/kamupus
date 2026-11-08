@@ -1,6 +1,12 @@
 import os
 from datetime import timedelta
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    print('⚠ python-dotenv not installed — run: pip install python-dotenv')
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 
@@ -13,43 +19,38 @@ def env_or(key, default):
 class Config:
     SECRET_KEY = env_or('SECRET_KEY', 'fundar-dev-secret-change-in-prod')
 
+    # ── Database ──
     db_url = env_or('DATABASE_URL', '')
-if db_url and db_url.startswith('postgres://'):
-    db_url = db_url.replace('postgres://', 'postgresql+psycopg://', 1)
-elif db_url and db_url.startswith('postgresql://'):
-    db_url = db_url.replace('postgresql://', 'postgresql+psycopg://', 1)
+
+    # Normalise legacy postgres:// → postgresql://
+    if db_url and db_url.startswith('postgres://'):
+        db_url = db_url.replace('postgres://', 'postgresql://', 1)
 
     if db_url:
         SQLALCHEMY_DATABASE_URI = db_url
     else:
         SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(BASE_DIR, 'fundar.db')
 
-        SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # ── Connection pool — fixes Neon/Railway "SSL connection closed" errors ──
+    # ── Connection pool (fixes Neon idle disconnects) ──
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_pre_ping': True,    # test connection before use
-        'pool_recycle': 300,      # refresh every 5 min (Neon's idle timeout)
-        'connect_args': {
-            'keepalives': 1,          # enable TCP keepalives
-            'keepalives_idle': 30,    # send keepalive after 30s of inactivity
-            'keepalives_interval': 5, # retry every 5s if no ack
-            'keepalives_count': 5,    # give up after 5 failed attempts
-        },
+        'pool_pre_ping': True,
+        'pool_recycle': 300,
     }
 
+    # ── Uploads ──
     UPLOAD_FOLDER = env_or('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
     MAX_CONTENT_LENGTH = 20 * 1024 * 1024
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'pdf'}
 
+    # ── Admin ──
     ADMIN_PATH = env_or('ADMIN_PATH', '/admin')
-    ADMIN_KEY = env_or('ADMIN_KEY', 'fundar-admin-2026')
+    ADMIN_KEY = env_or('ADMIN_KEY', 'kamupus-admin-2026')
     ADMIN_SESSION_MINUTES = int(env_or('ADMIN_SESSION_MINUTES', '30'))
 
-    # ── SESSION PERSISTENCE ──
-    # Users stay logged in for 365 days after their last visit,
-    # even if they fully close the browser.
+    # ── Sessions ──
     PERMANENT_SESSION_LIFETIME = timedelta(days=365)
-    SESSION_COOKIE_HTTPONLY = True        # JS cannot read the cookie (XSS protection)
-    SESSION_COOKIE_SAMESITE = 'Lax'       # blocks cross-site form POSTs
-    SESSION_COOKIE_SECURE = True        # uncomment ONLY if served over HTTPS
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    # SESSION_COOKIE_SECURE = True   # uncomment once you have HTTPS custom domain
