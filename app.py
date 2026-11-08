@@ -540,7 +540,7 @@ def api_create_post():
         tag = request.form.get('tag') or ('anon' if anon else 'gist')
         image = request.files.get('image')
         image_path = None
-                if image and image.filename and allowed_image(image.filename):
+        if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'post{current_user().id}')
             if not image_path:
                 return jsonify({
