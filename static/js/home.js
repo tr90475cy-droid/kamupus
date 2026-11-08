@@ -44,7 +44,11 @@ function escHtml(s) {
 }
 function escAttr(s) { return escHtml(s); }
 
+// ═══════════════════════════════════════════════════════
+// FEED
+// ═══════════════════════════════════════════════════════
 async function loadFeed(filter) {
+  if (!feedEl) return;                       // BUG #2 fix: safe when #feed missing
   if (!filter) filter = 'all';
   currentFilter = filter;
   feedEl.innerHTML = L + 'div class="empty"' + G + 'Loading feed…' + L + '/div' + G;
@@ -54,11 +58,12 @@ async function loadFeed(filter) {
     renderFeed(await res.json());
   } catch (err) {
     console.error('Feed load failed:', err);
-    feedEl.innerHTML = L + 'div class="empty"' + G + 'Could not load feed.' + L + '/div' + G;
+    if (feedEl) feedEl.innerHTML = L + 'div class="empty"' + G + 'Could not load feed.' + L + '/div' + G;
   }
 }
 
 function renderFeed(posts) {
+  if (!feedEl) return;
   if (!posts || !posts.length) {
     feedEl.innerHTML = L + 'div class="empty"' + G + 'No posts here yet. Be the first!' + L + '/div' + G;
     return;
@@ -103,7 +108,6 @@ function postHtml(p) {
   const heartFill = p.liked ? 'currentColor' : 'none';
   const likedClass = p.liked ? 'liked' : '';
 
-  // ═══ DELETE BUTTON — only for the post owner ═══
   const isMine = p.mine === true;
   const deleteBtn = isMine
     ? L + 'button class="act act-delete" data-action="delete" title="Delete post"' +
@@ -159,47 +163,53 @@ function postHtml(p) {
     + L + '/article' + G;
 }
 
-feedEl.addEventListener('click', async function(e) {
-  // 1. Image lightbox
-  const clickedImg = e.target.closest('.post-img');
-  if (clickedImg) {
-    const lightbox = document.getElementById('imageLightbox');
-    const lightboxImg = document.getElementById('lightboxImg');
-    if (lightbox && lightboxImg) {
-      lightboxImg.src = clickedImg.src;
-      lightbox.style.display = 'flex';
-      document.body.style.overflow = 'hidden';
+// ─── Feed click handler (guarded) ───
+if (feedEl) {
+  feedEl.addEventListener('click', async function(e) {
+    // 1. Image lightbox
+    const clickedImg = e.target.closest('.post-img');
+    if (clickedImg) {
+      const lightbox = document.getElementById('imageLightbox');
+      const lightboxImg = document.getElementById('lightboxImg');
+      if (lightbox && lightboxImg) {
+        lightboxImg.src = clickedImg.src;
+        lightbox.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+      }
+      return;
     }
-    return;
-  }
 
-  // 2. Post body expand/collapse
-  const postBody = e.target.closest('.post-body');
-  if (postBody) {
-    postBody.classList.toggle('expanded');
-    return;
-  }
+    // 2. Post body expand/collapse — skip when user is selecting text (BUG #6 fix)
+    const postBody = e.target.closest('.post-body');
+    if (postBody) {
+      const sel = window.getSelection();
+      if (sel && sel.toString().length > 0) return;
+      postBody.classList.toggle('expanded');
+      return;
+    }
 
-  // 3. Action buttons
-  const btn = e.target.closest('[data-action]');
-  if (!btn) return;
-  const card = btn.closest('.post');
-  if (!card) return;
-  const id = card.dataset.id;
-  const action = btn.dataset.action;
+    // 3. Action buttons
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const card = btn.closest('.post');
+    if (!card) return;
+    const id = card.dataset.id;
+    const action = btn.dataset.action;
 
-  if (action === 'like') await toggleLike(btn, id);
-  else if (action === 'comment') await openComments(id);
-  else if (action === 'follow') await toggleFollow(btn);
-  else if (action === 'share') await sharePost(id);
-  else if (action === 'delete') await deletePost(id, card);
-});
+    if (action === 'like') await toggleLike(btn, id);
+    else if (action === 'comment') await openComments(id);
+    else if (action === 'follow') await toggleFollow(btn);
+    else if (action === 'share') await sharePost(id);
+    else if (action === 'delete') await deletePost(id, card);
+  });
+}
 
-// ═══ DELETE POST ═══
+// ═══════════════════════════════════════════════════════
+// DELETE POST
+// ═══════════════════════════════════════════════════════
 async function deletePost(postId, card) {
   if (!confirm('Delete this post? This cannot be undone.')) return;
 
-  // Disable the button during the request
   const btn = card.querySelector('[data-action="delete"]');
   if (btn) {
     btn.disabled = true;
@@ -217,7 +227,6 @@ async function deletePost(postId, card) {
       throw new Error(errData.error || 'Server error ' + res.status);
     }
 
-    // Animate out and remove
     card.style.transition = 'opacity 0.3s, transform 0.3s';
     card.style.opacity = '0';
     card.style.transform = 'scale(0.95)';
@@ -231,9 +240,14 @@ async function deletePost(postId, card) {
   }
 }
 
-// ═══ SHARE POST ═══
+// ═══════════════════════════════════════════════════════
+// SHARE POST — BUG #4 fix: was pointing to /user/<id> (wrong route)
+// ═══════════════════════════════════════════════════════
 async function sharePost(postId) {
-  const url = window.location.origin + '/user/' + postId;
+  // If you later add a /post/<id> permalink route, change this to:
+  //   const url = window.location.origin + '/post/' + postId;
+  const url = window.location.origin + '/home';
+
   if (navigator.share) {
     try {
       await navigator.share({ title: 'KAMUPUS', text: 'Check this out on KAMUPUS', url: url });
@@ -250,6 +264,9 @@ async function sharePost(postId) {
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// LIKE
+// ═══════════════════════════════════════════════════════
 async function toggleLike(btn, postId) {
   const wasLiked = btn.classList.contains('liked');
   const countEl = btn.querySelector('.like-count');
@@ -270,6 +287,9 @@ async function toggleLike(btn, postId) {
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// FOLLOW
+// ═══════════════════════════════════════════════════════
 async function toggleFollow(btn) {
   const uid = btn.dataset.uid;
   const following = btn.dataset.following === 'true';
@@ -288,22 +308,28 @@ async function toggleFollow(btn) {
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// COMMENTS — guards added to every function
+// ═══════════════════════════════════════════════════════
 async function openComments(postId) {
+  if (!commentsModal || !commentsList) return;
   currentPostId = postId;
   commentsModal.classList.add('open');
   document.body.style.overflow = 'hidden';
   commentsList.innerHTML = L + 'div class="empty"' + G + 'Loading…' + L + '/div' + G;
-  commentInput.value = '';
-  commentAnon.classList.remove('on');
+  if (commentInput) commentInput.value = '';
+  if (commentAnon) commentAnon.classList.remove('on');
   await loadComments(postId);
-  setTimeout(function() { commentInput.focus(); }, 250);
+  setTimeout(function() { if (commentInput) commentInput.focus(); }, 250);
 }
 
 async function loadComments(postId) {
+  if (!commentsList) return;
   try {
     const res = await fetch('/api/posts/' + postId + '/comments', { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);   // BUG #5 fix
     const comments = await res.json();
-    if (!comments.length) {
+    if (!Array.isArray(comments) || !comments.length) {   // BUG #5 fix
       commentsList.innerHTML = L + 'div class="empty"' + G + 'No comments yet. Be the first!' + L + '/div' + G;
       return;
     }
@@ -329,43 +355,42 @@ async function loadComments(postId) {
     }).join('');
     commentsList.scrollTop = commentsList.scrollHeight;
   } catch (e) {
-    commentsList.innerHTML = L + 'div class="empty"' + G + 'Could not load comments.' + L + '/div' + G;
+    if (commentsList) commentsList.innerHTML = L + 'div class="empty"' + G + 'Could not load comments.' + L + '/div' + G;
   }
 }
 
 function closeComments() {
+  if (!commentsModal) return;
   commentsModal.classList.remove('open');
   document.body.style.overflow = '';
   currentPostId = null;
 }
 
-commentsClose.addEventListener('click', closeComments);
-commentsModal.addEventListener('click', function(e) { if (e.target === commentsModal) closeComments(); });
-commentAnon.addEventListener('click', function() { commentAnon.classList.toggle('on'); });
-commentSend.addEventListener('click', sendComment);
-commentInput.addEventListener('keydown', function(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendComment(); }
-});
-
 async function sendComment() {
+  if (!commentInput || !commentSend || !currentPostId) return;
   const content = commentInput.value.trim();
-  if (!content || !currentPostId) return;
+  if (!content) return;
   commentSend.disabled = true;
   try {
     const res = await fetch('/api/posts/' + currentPostId + '/comments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ content: content, anonymous: commentAnon.classList.contains('on') })
+      body: JSON.stringify({
+        content: content,
+        anonymous: commentAnon ? commentAnon.classList.contains('on') : false
+      })
     });
     if (!res.ok) throw new Error();
     commentInput.value = '';
-    commentAnon.classList.remove('on');
+    if (commentAnon) commentAnon.classList.remove('on');
     await loadComments(currentPostId);
-    const card = feedEl.querySelector('.post[data-id="' + currentPostId + '"]');
-    if (card) {
-      const cc = card.querySelector('.comment-count');
-      if (cc) cc.textContent = parseInt(cc.textContent, 10) + 1;
+    if (feedEl) {
+      const card = feedEl.querySelector('.post[data-id="' + currentPostId + '"]');
+      if (card) {
+        const cc = card.querySelector('.comment-count');
+        if (cc) cc.textContent = parseInt(cc.textContent, 10) + 1;
+      }
     }
   } catch (e) {
     alert('Could not post comment. Please try again.');
@@ -374,51 +399,78 @@ async function sendComment() {
   }
 }
 
-chipsEl.addEventListener('click', function(e) {
-  const chip = e.target.closest('.chip');
-  if (!chip || chip.classList.contains('active')) return;
-  chipsEl.querySelectorAll('.chip').forEach(function(c) { c.classList.remove('active'); });
-  chip.classList.add('active');
-  loadFeed(chip.dataset.filter);
+// ─── Comment listeners (guarded) ───
+if (commentsClose) commentsClose.addEventListener('click', closeComments);
+if (commentsModal) commentsModal.addEventListener('click', function(e) {
+  if (e.target === commentsModal) closeComments();
+});
+if (commentAnon) commentAnon.addEventListener('click', function() {
+  commentAnon.classList.toggle('on');
+});
+if (commentSend) commentSend.addEventListener('click', sendComment);
+if (commentInput) commentInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendComment(); }
 });
 
+// ═══════════════════════════════════════════════════════
+// CHIPS (feed filter)
+// ═══════════════════════════════════════════════════════
+if (chipsEl) {
+  chipsEl.addEventListener('click', function(e) {
+    const chip = e.target.closest('.chip');
+    if (!chip || chip.classList.contains('active')) return;
+    chipsEl.querySelectorAll('.chip').forEach(function(c) { c.classList.remove('active'); });
+    chip.classList.add('active');
+    loadFeed(chip.dataset.filter);
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// COMPOSER
+// ═══════════════════════════════════════════════════════
 function openComposer(opts) {
+  if (!modalBackEl) return;
   const anonymous = opts && opts.anonymous;
   modalBackEl.classList.add('open');
   document.body.style.overflow = 'hidden';
   setAnonymous(!!anonymous);
-  setTimeout(function() { composerEl.focus(); }, 250);
+  setTimeout(function() { if (composerEl) composerEl.focus(); }, 250);
 }
 
 function closeComposer() {
+  if (!modalBackEl) return;
   modalBackEl.classList.remove('open');
   document.body.style.overflow = '';
-  composerEl.value = '';
-  composerFile.value = '';
-  composerPreview.classList.add('hidden');
-  previewImg.src = '';
-  postBtnEl.disabled = true;
+  if (composerEl) composerEl.value = '';
+  if (composerFile) composerFile.value = '';
+  if (composerPreview) composerPreview.classList.add('hidden');
+  if (previewImg) previewImg.src = '';
+  if (postBtnEl) postBtnEl.disabled = true;
   isPosting = false;
   setAnonymous(false);
 }
 
-fabEl.addEventListener('click', function() { openComposer(); });
-if (anonShortcut) anonShortcut.addEventListener('click', function() { openComposer({ anonymous: true }); });
-modalCloseEl.addEventListener('click', closeComposer);
-modalBackEl.addEventListener('click', function(e) { if (e.target === modalBackEl) closeComposer(); });
-
 function setAnonymous(v) {
   isAnon = v;
-  anonToggleEl.classList.toggle('on', v);
-  anonLabelEl.textContent = v ? 'Posting anonymously' : 'Post anonymously';
-  composerEl.placeholder = v ? 'Share a gist anonymously…' : "What's happening on campus?";
+  if (anonToggleEl) anonToggleEl.classList.toggle('on', v);
+  if (anonLabelEl) anonLabelEl.textContent = v ? 'Posting anonymously' : 'Post anonymously';
+  if (composerEl) composerEl.placeholder = v ? 'Share a gist anonymously…' : "What's happening on campus?";
 }
-anonToggleEl.addEventListener('click', function() { setAnonymous(!isAnon); });
 
-if (toolPhoto) toolPhoto.addEventListener('click', function() { composerFile.click(); });
+if (fabEl) fabEl.addEventListener('click', function() { openComposer(); });
+if (anonShortcut) anonShortcut.addEventListener('click', function() { openComposer({ anonymous: true }); });
+if (modalCloseEl) modalCloseEl.addEventListener('click', closeComposer);
+if (modalBackEl) modalBackEl.addEventListener('click', function(e) {
+  if (e.target === modalBackEl) closeComposer();
+});
+if (anonToggleEl) anonToggleEl.addEventListener('click', function() { setAnonymous(!isAnon); });
+
+if (toolPhoto) toolPhoto.addEventListener('click', function() {
+  if (composerFile) composerFile.click();
+});
 if (composerFile) composerFile.addEventListener('change', function() {
   const file = composerFile.files[0];
-  if (!file) return;
+  if (!file || !previewImg || !composerPreview) return;
   const reader = new FileReader();
   reader.onload = function(ev) {
     previewImg.src = ev.target.result;
@@ -428,25 +480,27 @@ if (composerFile) composerFile.addEventListener('change', function() {
   updatePostBtn();
 });
 if (previewRemove) previewRemove.addEventListener('click', function() {
-  composerFile.value = '';
-  composerPreview.classList.add('hidden');
-  previewImg.src = '';
+  if (composerFile) composerFile.value = '';
+  if (composerPreview) composerPreview.classList.add('hidden');
+  if (previewImg) previewImg.src = '';
   updatePostBtn();
 });
 
 function updatePostBtn() {
-  const hasText = composerEl.value.trim().length > 0;
+  if (!postBtnEl) return;
+  const hasText = composerEl && composerEl.value.trim().length > 0;
   const hasImg = composerFile && composerFile.files.length > 0;
   postBtnEl.disabled = (!hasText && !hasImg) || isPosting;
 }
 
-composerEl.addEventListener('input', updatePostBtn);
-composerEl.addEventListener('keydown', function(e) {
+if (composerEl) composerEl.addEventListener('input', updatePostBtn);
+if (composerEl) composerEl.addEventListener('keydown', function(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); submitPost(); }
 });
-postBtnEl.addEventListener('click', submitPost);
+if (postBtnEl) postBtnEl.addEventListener('click', submitPost);
 
 async function submitPost() {
+  if (!composerEl || !postBtnEl) return;
   const content = composerEl.value.trim();
   const hasImg = composerFile && composerFile.files.length > 0;
   if ((!content && !hasImg) || isPosting) return;
@@ -485,17 +539,22 @@ async function submitPost() {
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// SEARCH
+// ═══════════════════════════════════════════════════════
 function openSearch() {
+  if (!searchOverlay) return;
   searchOverlay.classList.add('open');
   document.body.style.overflow = 'hidden';
-  setTimeout(function() { searchInput.focus(); }, 100);
+  setTimeout(function() { if (searchInput) searchInput.focus(); }, 100);
 }
 
 function closeSearch() {
+  if (!searchOverlay) return;
   searchOverlay.classList.remove('open');
   document.body.style.overflow = '';
-  searchInput.value = '';
-  searchResults.innerHTML = L + 'div class="search-tip"' + G + 'Try typing a name, a topic, a course code…' + L + '/div' + G;
+  if (searchInput) searchInput.value = '';
+  if (searchResults) searchResults.innerHTML = L + 'div class="search-tip"' + G + 'Try typing a name, a topic, a course code…' + L + '/div' + G;
 }
 
 if (searchBtn) searchBtn.addEventListener('click', openSearch);
@@ -506,16 +565,18 @@ if (searchInput) searchInput.addEventListener('input', function() {
   clearTimeout(searchTimer);
   const q = searchInput.value.trim();
   if (q.length < 1) {
-    searchResults.innerHTML = L + 'div class="search-tip"' + G + 'Try typing a name, a topic, a course code…' + L + '/div' + G;
+    if (searchResults) searchResults.innerHTML = L + 'div class="search-tip"' + G + 'Try typing a name, a topic, a course code…' + L + '/div' + G;
     return;
   }
   searchTimer = setTimeout(function() { runSearch(q); }, 220);
 });
 
 async function runSearch(q) {
+  if (!searchResults) return;
   searchResults.innerHTML = L + 'div class="search-loading"' + G + 'Searching…' + L + '/div' + G;
   try {
-    const res = await fetch('/api/search?q=' + encodeURIComponent(q));
+    // NOTE: /api/search endpoint must exist in app.py — see backend section
+    const res = await fetch('/api/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' });
     if (!res.ok) throw new Error();
     const data = await res.json();
     renderSearchResults(data, q);
@@ -586,12 +647,13 @@ function listingRow(l) {
 }
 
 function renderSearchResults(data, q) {
+  if (!searchResults) return;
   const sections = [];
-  if (data.people.length) sections.push(sectionHtml('People', data.people.map(personRow).join('')));
-  if (data.groups.length) sections.push(sectionHtml('Groups', data.groups.map(groupRow).join('')));
-  if (data.posts.length) sections.push(sectionHtml('Posts', data.posts.map(postRow).join('')));
-  if (data.events.length) sections.push(sectionHtml('Events', data.events.map(eventRow).join('')));
-  if (data.listings.length) sections.push(sectionHtml('Marketplace', data.listings.map(listingRow).join('')));
+  if (data.people && data.people.length) sections.push(sectionHtml('People', data.people.map(personRow).join('')));
+  if (data.groups && data.groups.length) sections.push(sectionHtml('Groups', data.groups.map(groupRow).join('')));
+  if (data.posts && data.posts.length) sections.push(sectionHtml('Posts', data.posts.map(postRow).join('')));
+  if (data.events && data.events.length) sections.push(sectionHtml('Events', data.events.map(eventRow).join('')));
+  if (data.listings && data.listings.length) sections.push(sectionHtml('Marketplace', data.listings.map(listingRow).join('')));
   if (!sections.length) {
     searchResults.innerHTML = L + 'div class="search-empty"' + G + 'No results for "' + escHtml(q) + '"' + L + '/div' + G;
     return;
@@ -599,50 +661,64 @@ function renderSearchResults(data, q) {
   searchResults.innerHTML = sections.join('');
 }
 
-if (searchResults) searchResults.addEventListener('click', async function(e) {
-  const row = e.target.closest('.search-row');
-  if (!row) return;
-  const type = row.dataset.type;
-  if (type === 'person') {
-    const uid = parseInt(row.dataset.uid, 10);
-    closeSearch();
-    await fetch('/api/chat/dm/' + uid, { method: 'POST' });
-    window.location.href = '/chat?dm=' + uid;
-  } else if (type === 'group') {
-    closeSearch();
-    window.location.href = '/chat?room=' + row.dataset.rid;
-  } else if (type === 'post') {
-    const pid = row.dataset.pid;
-    closeSearch();
-    await loadFeed('all');
-    const card = feedEl.querySelector('.post[data-id="' + pid + '"]');
-    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  } else if (type === 'event') {
-    closeSearch();
-    window.location.href = '/parties';
-  } else if (type === 'listing') {
-    closeSearch();
-    window.location.href = '/market';
-  }
-});
+if (searchResults) {
+  searchResults.addEventListener('click', async function(e) {
+    const row = e.target.closest('.search-row');
+    if (!row) return;
+    const type = row.dataset.type;
+    if (type === 'person') {
+      const uid = parseInt(row.dataset.uid, 10);
+      closeSearch();
+      try { await fetch('/api/chat/dm/' + uid, { method: 'POST', credentials: 'same-origin' }); } catch (err) {}
+      window.location.href = '/chat?dm=' + uid;
+    } else if (type === 'group') {
+      closeSearch();
+      window.location.href = '/chat?room=' + row.dataset.rid;
+    } else if (type === 'post') {
+      const pid = row.dataset.pid;
+      closeSearch();
+      await loadFeed('all');
+      if (feedEl) {
+        const card = feedEl.querySelector('.post[data-id="' + pid + '"]');
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    } else if (type === 'event') {
+      closeSearch();
+      window.location.href = '/parties';
+    } else if (type === 'listing') {
+      closeSearch();
+      window.location.href = '/market';
+    }
+  });
+}
 
-if (actionsEl) actionsEl.addEventListener('click', function(e) {
-  const action = e.target.closest('.action');
-  if (!action) return;
-  const kind = action.dataset.action;
-  if (kind === 'anonymous') return;
-  const routes = { market: '/market', assignments: '/assignments', chat: '/chat', parties: '/parties', connect: '/connect' };
-  if (routes[kind]) window.location.href = routes[kind];
-});
+// ═══════════════════════════════════════════════════════
+// NAV / ACTIONS
+// ═══════════════════════════════════════════════════════
+if (actionsEl) {
+  actionsEl.addEventListener('click', function(e) {
+    const action = e.target.closest('.action');
+    if (!action) return;
+    const kind = action.dataset.action;
+    if (kind === 'anonymous') return;
+    const routes = { market: '/market', assignments: '/assignments', chat: '/chat', parties: '/parties', connect: '/connect' };
+    if (routes[kind]) window.location.href = routes[kind];
+  });
+}
 
-if (navEl) navEl.addEventListener('click', function(e) {
-  const item = e.target.closest('.nav-item');
-  if (!item || item.classList.contains('active')) return;
-  const tab = item.dataset.tab;
-  const routes = { market: '/market', chat: '/chat', me: '/me', connect: '/connect' };
-  if (routes[tab]) window.location.href = routes[tab];
-});
+if (navEl) {
+  navEl.addEventListener('click', function(e) {
+    const item = e.target.closest('.nav-item');
+    if (!item || item.classList.contains('active')) return;
+    const tab = item.dataset.tab;
+    const routes = { market: '/market', chat: '/chat', me: '/me', connect: '/connect' };
+    if (routes[tab]) window.location.href = routes[tab];
+  });
+}
 
+// ═══════════════════════════════════════════════════════
+// KEYBOARD (Escape closes modals)
+// ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   if (commentsModal && commentsModal.classList.contains('open')) closeComments();
@@ -650,15 +726,21 @@ document.addEventListener('keydown', function(e) {
   if (searchOverlay && searchOverlay.classList.contains('open')) closeSearch();
 });
 
-// Close the full screen image when clicked
+// ═══════════════════════════════════════════════════════
+// IMAGE LIGHTBOX CLOSE
+// ═══════════════════════════════════════════════════════
 const lightbox = document.getElementById('imageLightbox');
 if (lightbox) {
   lightbox.addEventListener('click', function() {
     this.style.display = 'none';
-    document.getElementById('lightboxImg').src = '';
+    const img = document.getElementById('lightboxImg');
+    if (img) img.src = '';
     document.body.style.overflow = '';
   });
 }
 
-loadFeed();
+// ═══════════════════════════════════════════════════════
+// BOOT — BUG #2 fix
+// ═══════════════════════════════════════════════════════
+if (feedEl) loadFeed();
 })();

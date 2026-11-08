@@ -1246,6 +1246,81 @@ def api_users_search():
         })
     return jsonify(result)
 
+    @app.route('/api/search')
+@verified_required
+def api_search():
+    me = current_user()
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return jsonify({'people': [], 'groups': [], 'posts': [], 'events': [], 'listings': []})
+
+    q_lower = q.lower()
+
+    # People
+    people = []
+    for u in User.query.filter(
+        User.id != me.id,
+        User.verification_status == 'verified',
+        User.role != 'admin',
+    ).limit(200).all():
+        name = (u.full_name or '').lower()
+        email = (u.email or '').lower()
+        if q_lower in name or any(w.startswith(q_lower) for w in name.split()) or q_lower in email:
+            v = u.verification
+            people.append({
+                'id': u.id, 'name': u.full_name, 'avatar': user_avatar(u),
+                'department': v.department if v else '',
+                'level': v.level if v else '',
+            })
+            if len(people) >= 10: break
+
+    # Groups (rooms you're a member of)
+    groups = []
+    my_room_ids = [m.room_id for m in ChatMember.query.filter_by(user_id=me.id).all()]
+    if my_room_ids:
+        for r in ChatRoom.query.filter(
+            ChatRoom.id.in_(my_room_ids),
+            ChatRoom.is_group == True,
+        ).limit(100).all():
+            if q_lower in (r.name or '').lower():
+                groups.append({'id': r.id, 'name': r.name, 'member_count': len(r.members)})
+                if len(groups) >= 5: break
+
+    # Posts
+    posts = []
+    for p in Post.query.filter(Post.content.ilike(f'%{q}%'))\
+                      .order_by(Post.created_at.desc()).limit(10).all():
+        posts.append({
+            'id': p.id,
+            'snippet': p.content[:80] + ('…' if len(p.content) > 80 else ''),
+            'author': 'Anonymous' if p.anonymous else p.author.full_name,
+            'time': time_ago(p.created_at),
+            'anonymous': p.anonymous,
+        })
+
+    # Events
+    events = []
+    for e in Event.query.filter(Event.title.ilike(f'%{q}%')).limit(5).all():
+        events.append({
+            'id': e.id, 'title': e.title, 'venue': e.venue or '',
+            'starts_label': e.starts_at.strftime('%a, %b %d · %I:%M %p'),
+        })
+
+    # Listings
+    listings = []
+    for l in Listing.query.filter(
+        db.or_(Listing.title.ilike(f'%{q}%'), Listing.description.ilike(f'%{q}%'))
+    ).filter(Listing.sold == False).limit(5).all():
+        listings.append({'id': l.id, 'title': l.title, 'price': l.price})
+
+    return jsonify({
+        'people': people,
+        'groups': groups,
+        'posts': posts,
+        'events': events,
+        'listings': listings,
+    })
+
 @app.route('/api/users')
 @verified_required
 def api_users():

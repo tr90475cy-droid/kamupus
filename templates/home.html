@@ -9,7 +9,8 @@
   <!-- ═══════════ HEADER ═══════════ -->
   <header class="header">
     <div class="header-brand">
-      <div class="header-mark">K</div>
+      <img src="{{ url_for('static', filename='logo.jpeg') }}" alt="KAMUPUS"
+           style="height:36px; width:36px; object-fit:contain; mix-blend-mode:screen; border-radius:8px;">
       <div class="header-brand-text">
         <div class="header-brand-name">Kamupus</div>
         <div class="header-brand-sub">Lead City University</div>
@@ -191,7 +192,7 @@
   </div>
 </div>
 
-<!-- ═══════════ COMMENTS MODAL (OUTSIDE composer) ═══════════ -->
+<!-- ═══════════ COMMENTS MODAL ═══════════ -->
 <div class="modal-back" id="commentsModal">
   <div class="modal modal-tall">
     <div class="modal-head">
@@ -206,7 +207,8 @@
 
     <div class="comment-input-row">
       <button class="anon-chip" id="commentAnon" aria-label="Comment anonymously">🥷</button>
-      <input type="text" id="commentInput" placeholder="Add a comment…" maxlength="500">
+      <textarea id="commentInput" placeholder="Add a comment…" rows="1"
+                style="resize:none; flex:1;"></textarea>
       <button class="btn btn-primary btn-sm" id="commentSend">Send</button>
     </div>
   </div>
@@ -235,12 +237,13 @@
     <div class="search-overlay-results" id="searchResults">
       <div class="search-tip">Try typing a name, a topic, a course code…</div>
     </div>
-    <!-- Full Screen Image Viewer -->
-<div id="imageLightbox" style="display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.95); backdrop-filter: blur(5px); align-items: center; justify-content: center; cursor: zoom-out;">
-    <img id="lightboxImg" src="" alt="" style="max-width: 100vw; max-height: 100vh; object-fit: contain;">
-</div>
 
   </div>
+</div>
+
+<!-- ═══════════ IMAGE LIGHTBOX — FIXED: now OUTSIDE search overlay ═══════════ -->
+<div id="imageLightbox" style="display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.95); backdrop-filter: blur(5px); align-items: center; justify-content: center; cursor: zoom-out;">
+  <img id="lightboxImg" src="" alt="" style="max-width: 100vw; max-height: 100vh; object-fit: contain;">
 </div>
 
 {% endblock %}
