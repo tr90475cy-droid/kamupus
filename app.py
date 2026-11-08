@@ -1675,6 +1675,36 @@ def api_debug_users():
         'whatsapp': getattr(u, 'whatsapp_number', '') or '',
     } for u in users])
 
+@app.route('/api/debug/supabase')
+def debug_supabase():
+    """Public debug endpoint — no auth needed. Shows Supabase status."""
+    import os as _os
+    url = _os.environ.get('SUPABASE_URL', '')
+    key = _os.environ.get('SUPABASE_SERVICE_KEY', '') or _os.environ.get('SUPABASE_KEY', '')
+    bucket = _os.environ.get('SUPABASE_BUCKET', 'uploads')
+
+    result = {
+        'env_url_set': bool(url),
+        'env_url_preview': (url[:40] + '...') if url else None,
+        'env_key_set': bool(key),
+        'env_key_length': len(key) if key else 0,
+        'bucket_name': bucket,
+        'supabase_client': supabase is not None,
+    }
+
+    if supabase is None:
+        result['error'] = 'supabase client is None — package not installed OR env vars missing'
+        return jsonify(result), 500
+
+    try:
+        buckets = supabase.storage.list_buckets()
+        result['available_buckets'] = [b.name for b in buckets]
+        result['bucket_exists'] = bucket in [b.name for b in buckets]
+    except Exception as e:
+        result['error'] = f'{type(e).__name__}: {e}'
+
+    return jsonify(result)
+
 # ─────────────────────────────────────────────
 # INIT
 # ─────────────────────────────────────────────
@@ -1730,6 +1760,7 @@ with app.app_context():
             ))
             db.session.commit()
             print(f'✓ Admin created: {admin_email}')
+            
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
