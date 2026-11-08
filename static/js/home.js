@@ -374,18 +374,33 @@ async function submitPost() {
   isPosting = true;
   postBtnEl.disabled = true;
   postBtnEl.textContent = 'Posting…';
+  
   const fd = new FormData();
   fd.append('content', content);
   fd.append('anonymous', isAnon ? 'true' : 'false');
   fd.append('tag', isAnon ? 'anon' : 'gist');
   if (hasImg) fd.append('image', composerFile.files[0]);
+  
   try {
     const res = await fetch('/api/posts', { method: 'POST', body: fd, credentials: 'same-origin' });
-    if (!res.ok) throw new Error();
+    
+    // THIS IS THE NEW PART: Catch the exact error from Flask
+    if (!res.ok) {
+      let errorMsg = 'Unknown error';
+      try {
+        const errorData = await res.json();
+        errorMsg = errorData.error || 'Server rejected the post';
+      } catch(err) {
+        errorMsg = 'Server error (' + res.status + ')';
+      }
+      throw new Error(errorMsg);
+    }
+    
     closeComposer();
     await loadFeed(currentFilter);
   } catch (e) {
-    alert('Could not publish. Please try again.');
+    // THIS IS THE NEW PART: Show the exact error
+    alert('Why it failed: ' + e.message); 
     postBtnEl.disabled = false;
   } finally {
     isPosting = false;
