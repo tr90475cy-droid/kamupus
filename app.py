@@ -1,6 +1,5 @@
 import os
 
-# 1. Load .env FIRST, before anything else reads environment variables
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -33,6 +32,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '') or os.environ.get('SUP
 SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
 
 supabase = None
+_last_upload_error = None
 
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -41,10 +41,13 @@ if SUPABASE_URL and SUPABASE_KEY:
         print('✓ Supabase Storage configured')
     except ImportError:
         print('⚠ supabase package not installed — uploads disabled')
+        print('  Fix: add "supabase==2.7.4" to requirements.txt and redeploy')
     except Exception as e:
         print(f'⚠ Supabase init failed: {e}')
 else:
     print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
+    print(f'  SUPABASE_URL set: {bool(SUPABASE_URL)}')
+    print(f'  SUPABASE_SERVICE_KEY set: {bool(SUPABASE_KEY)}')
 
 # ─────────────────────────────────────────────
 # APP SETUP
@@ -81,9 +84,6 @@ socketio = SocketIO(
     max_http_buffer_size=1_000_000,
 )
 
-# ─────────────────────────────────────────────
-# SILENCE SOCKET.IO NOISE
-# ─────────────────────────────────────────────
 import logging
 
 class _DropDisconnectedSession(logging.Filter):
@@ -143,7 +143,6 @@ def current_user():
     return db.session.get(User, uid) if uid else None
 
 def get_file_url(path):
-    """Helper to safely return either a Supabase URL or a legacy local file URL."""
     if not path:
         return None
     if path.startswith('http'):
@@ -177,17 +176,18 @@ def verified_required(f):
 # ─────────────────────────────────────────────
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
-_last_upload_error = None
-
 def save_upload(file, prefix):
-    """Upload a file to Supabase Storage. Returns the public URL, or None on failure.
-    Sets _last_upload_error so the caller can return the real reason."""
+    """Upload to Supabase. Returns public URL on success, None on failure.
+    Sets _last_upload_error so callers can surface the real reason."""
     global _last_upload_error
     _last_upload_error = None
 
     if not supabase:
-        _last_upload_error = 'Supabase client not initialized (check env vars + supabase package)'
-        print(f'[UPLOAD] {_last_upload_error}')
+        _last_upload_error = 'Supabase client not initialized'
+        print(f'❌ [UPLOAD] {_last_upload_error}')
+        print(f'   SUPABASE_URL set: {bool(SUPABASE_URL)}')
+        print(f'   SUPABASE_SERVICE_KEY set: {bool(SUPABASE_KEY)}')
+        print(f'   → Fix: add supabase to requirements.txt + set env vars on Railway')
         return None
 
     content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
@@ -198,12 +198,12 @@ def save_upload(file, prefix):
         file_bytes = file.read()
     except Exception as e:
         _last_upload_error = f'Could not read file: {e}'
-        print(f'[UPLOAD] {_last_upload_error}')
+        print(f'❌ [UPLOAD] {_last_upload_error}')
         return None
 
     if not file_bytes:
         _last_upload_error = 'File is empty (0 bytes)'
-        print(f'[UPLOAD] {_last_upload_error}')
+        print(f'❌ [UPLOAD] {_last_upload_error}')
         return None
 
     try:
@@ -214,12 +214,15 @@ def save_upload(file, prefix):
         )
         if hasattr(res, 'error') and res.error:
             _last_upload_error = f'Supabase error: {res.error}'
-            print(f'[SUPABASE UPLOAD ERROR] {_last_upload_error}')
+            print(f'❌ [SUPABASE UPLOAD ERROR] {_last_upload_error}')
             return None
-        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
+
+        url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
+        print(f'✓ [UPLOAD] {unique_name} → {url[:60]}...')
+        return url
     except Exception as e:
         _last_upload_error = f'{type(e).__name__}: {e}'
-        print(f'[SUPABASE UPLOAD EXCEPTION] {_last_upload_error}')
+        print(f'❌ [SUPABASE UPLOAD EXCEPTION] {_last_upload_error}')
         return None
 
 def delete_upload(path):
@@ -233,8 +236,9 @@ def delete_upload(path):
         if marker in path:
             key = path.split(marker, 1)[1]
             supabase.storage.from_(SUPABASE_BUCKET).remove([key])
+            print(f'✓ [DELETE] {key}')
     except Exception as e:
-        print(f'[SUPABASE DELETE ERROR] {e}')
+        print(f'⚠ [SUPABASE DELETE ERROR] {e}')
 
 def time_ago(dt):
     if not dt:
@@ -424,7 +428,7 @@ def verify():
         file_url = save_upload(tmp, f'verify{u.id}')
 
         if not file_url:
-            flash('Upload failed — please try again', 'error')
+            flash(f'Upload failed — {_last_upload_error or "please try again"}', 'error')
             return render_template('verify.html', form=request.form)
 
         if existing and existing.user_id == u.id:
@@ -478,6 +482,7 @@ def serialize_post(p, me_id):
         'time': time_ago(p.created_at), 'tag': p.tag, 'content': p.content,
         'image': get_file_url(p.image_path),
         'likes': len(p.likes), 'comments': len(p.comments), 'liked': liked,
+        'mine': p.user_id == me_id,
     }
 
 @app.route('/api/feed')
@@ -544,8 +549,7 @@ def api_create_post():
             image_path = save_upload(image, f'post{current_user().id}')
             if not image_path:
                 return jsonify({
-                    'error': 'Image upload failed',
-                    'reason': _last_upload_error or 'unknown',
+                    'error': f'Image upload failed: {_last_upload_error or "unknown"}',
                 }), 500
     else:
         d = request.get_json() or {}
@@ -562,6 +566,39 @@ def api_create_post():
     db.session.add(p)
     db.session.commit()
     return jsonify(serialize_post(p, current_user().id))
+
+
+# ═════════════════════════════════════════════
+# NEW: DELETE POST (owner or admin)
+# ═════════════════════════════════════════════
+@app.route('/api/posts/<int:pid>', methods=['DELETE'])
+@verified_required
+def api_delete_post(pid):
+    """Delete a post, its Supabase image, and its likes/comments.
+    Owner or admin only."""
+    me = current_user()
+    p = Post.query.get_or_404(pid)
+
+    if p.user_id != me.id and me.role != 'admin':
+        abort(403)
+
+    # Delete image from Supabase
+    if p.image_path:
+        delete_upload(p.image_path)
+
+    # Delete likes and comments explicitly (in case cascade isn't configured)
+    Like.query.filter_by(post_id=pid).delete()
+    Comment.query.filter_by(post_id=pid).delete()
+
+    # Delete the post
+    db.session.delete(p)
+    db.session.commit()
+
+    # Log if admin
+    if me.role == 'admin' and p.user_id != me.id:
+        log_admin_action('post_delete', target_user_id=p.user_id, detail=f'post {pid}')
+
+    return jsonify({'ok': True})
 
 @app.route('/api/posts/<int:pid>/like', methods=['POST'])
 @verified_required
@@ -658,7 +695,7 @@ def api_listings():
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'list{me.id}')
             if not image_path:
-                return jsonify({'error': 'Image upload failed'}), 500
+                return jsonify({'error': f'Image upload failed: {_last_upload_error or "unknown"}'}), 500
 
         listing = Listing(user_id=me.id, title=title, description=description,
                           price=price, category=category, image_path=image_path)
@@ -727,10 +764,7 @@ def buy_listing(listing_id):
                 'currency': 'NGN',
                 'redirect_url': url_for('market', _external=True),
                 'payment_options': 'banktransfer',
-                'customer': {
-                    'email': buyer.email,
-                    'name': buyer.full_name,
-                },
+                'customer': {'email': buyer.email, 'name': buyer.full_name},
                 'customizations': {
                     'title': 'KAMUPUS Marketplace',
                     'description': f'Payment for: {listing.title}',
@@ -770,7 +804,6 @@ def flutterwave_webhook():
         return 'ok', 200
 
     meta = data.get('meta') or {}
-
     if meta.get('type') == 'marketplace_sale':
         listing_id = meta.get('listing_id')
         buyer_id = meta.get('buyer_id')
@@ -813,21 +846,13 @@ def api_promote_listing(listing_id):
     amount = get_ad_price(days)
     ref = generate_ref(f'ad{listing.id}')
 
-    payment = AdPayment(
-        listing_id=listing.id,
-        user_id=u.id,
-        days=days,
-        amount=amount,
-        status='pending',
-        reference=ref,
-    )
+    payment = AdPayment(listing_id=listing.id, user_id=u.id, days=days,
+                        amount=amount, status='pending', reference=ref)
     db.session.add(payment)
     db.session.commit()
 
     return jsonify({
-        'reference': ref,
-        'days': days,
-        'amount': amount,
+        'reference': ref, 'days': days, 'amount': amount,
         'bank': AD_PAYMENT_BANK,
         'account_number': AD_PAYMENT_ACCOUNT,
         'account_name': AD_PAYMENT_NAME,
@@ -958,7 +983,7 @@ def api_assignments():
             attachment_name = file.filename
             attachment_path = save_upload(file, f'assign{me.id}')
             if not attachment_path:
-                return jsonify({'error': 'File upload failed'}), 500
+                return jsonify({'error': f'File upload failed: {_last_upload_error or "unknown"}'}), 500
 
         a = Assignment(user_id=me.id, course_code=course_code, course_title=course_title,
                        title=title, description=description, due_date=due_date,
@@ -1042,7 +1067,7 @@ def api_events():
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'event{me.id}')
             if not image_path:
-                return jsonify({'error': 'Image upload failed'}), 500
+                return jsonify({'error': f'Image upload failed: {_last_upload_error or "unknown"}'}), 500
 
         e = Event(user_id=me.id, title=title, description=description,
                   venue=venue, starts_at=starts_at, image_path=image_path)
@@ -1287,7 +1312,7 @@ def api_me_picture():
 
     file_url = save_upload(file, f'avatar{u.id}')
     if not file_url:
-        return jsonify({'error': 'Upload failed'}), 500
+        return jsonify({'error': f'Upload failed: {_last_upload_error or "unknown"}'}), 500
     u.profile_picture_path = file_url
     db.session.commit()
     return jsonify({'ok': True, 'avatar': user_avatar(u)})
@@ -1677,32 +1702,23 @@ def api_debug_users():
 
 @app.route('/api/debug/supabase')
 def debug_supabase():
-    """Public debug endpoint — no auth needed. Shows Supabase status."""
-    import os as _os
-    url = _os.environ.get('SUPABASE_URL', '')
-    key = _os.environ.get('SUPABASE_SERVICE_KEY', '') or _os.environ.get('SUPABASE_KEY', '')
-    bucket = _os.environ.get('SUPABASE_BUCKET', 'uploads')
-
+    """Public endpoint — visit in browser to check Supabase status."""
     result = {
-        'env_url_set': bool(url),
-        'env_url_preview': (url[:40] + '...') if url else None,
-        'env_key_set': bool(key),
-        'env_key_length': len(key) if key else 0,
-        'bucket_name': bucket,
+        'env_url_set': bool(SUPABASE_URL),
+        'env_key_set': bool(SUPABASE_KEY),
+        'bucket_name': SUPABASE_BUCKET,
         'supabase_client': supabase is not None,
     }
-
     if supabase is None:
-        result['error'] = 'supabase client is None — package not installed OR env vars missing'
+        result['error'] = 'Client not initialized'
         return jsonify(result), 500
-
     try:
         buckets = supabase.storage.list_buckets()
-        result['available_buckets'] = [b.name for b in buckets]
-        result['bucket_exists'] = bucket in [b.name for b in buckets]
+        names = [b.name for b in buckets]
+        result['available_buckets'] = names
+        result['bucket_exists'] = SUPABASE_BUCKET in names
     except Exception as e:
         result['error'] = f'{type(e).__name__}: {e}'
-
     return jsonify(result)
 
 # ─────────────────────────────────────────────
@@ -1760,7 +1776,6 @@ with app.app_context():
             ))
             db.session.commit()
             print(f'✓ Admin created: {admin_email}')
-            
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

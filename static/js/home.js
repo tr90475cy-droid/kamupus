@@ -76,7 +76,6 @@ function postHtml(p) {
     avatar = L + 'div class="avatar avatar-blank"' + G + L + '/div' + G;
   }
 
-  // Make avatar clickable for non-anonymous posts
   const avatarLink = (!p.anonymous && p.user_id)
     ? L + 'a href="/user/' + p.user_id + '" class="avatar-link"' + G + avatar + L + '/a' + G
     : avatar;
@@ -93,7 +92,6 @@ function postHtml(p) {
     followBtn = L + 'button class="follow-inline" data-action="follow" data-uid="' + p.user_id + '" data-following="false"' + G + 'Follow' + L + '/button' + G;
   }
 
-  // Author name: link for non-anonymous
   const authorHtml = p.anonymous
     ? L + 'span class="post-name"' + G + escHtml(p.author) + L + '/span' + G
     : L + 'a href="/user/' + p.user_id + '" class="post-name post-name-link"' + G + escHtml(p.author) + L + '/a' + G;
@@ -104,6 +102,22 @@ function postHtml(p) {
 
   const heartFill = p.liked ? 'currentColor' : 'none';
   const likedClass = p.liked ? 'liked' : '';
+
+  // ═══ DELETE BUTTON — only for the post owner ═══
+  const isMine = p.mine === true;
+  const deleteBtn = isMine
+    ? L + 'button class="act act-delete" data-action="delete" title="Delete post"' +
+      ' style="color:#ef4444;"' + G
+      + L + 'svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"' + G
+      + L + 'path d="M3 6h18"/' + G
+      + L + 'path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/' + G
+      + L + 'path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/' + G
+      + L + 'path d="M10 11v6"/' + G
+      + L + 'path d="M14 11v6"/' + G
+      + L + '/svg' + G
+      + L + 'span' + G + 'Delete' + L + '/span' + G
+      + L + '/button' + G
+    : '';
 
   return L + 'article class="post ' + (p.anonymous ? 'anon' : '') + '" data-id="' + p.id + '"' + G
     + L + 'div class="post-head"' + G
@@ -140,36 +154,101 @@ function postHtml(p) {
     + L + 'span' + G + 'Share' + L + '/span' + G
     + L + '/button' + G
     + L + 'div class="act-spacer"' + G + L + '/div' + G
+    + deleteBtn
     + L + '/div' + G
     + L + '/article' + G;
 }
 
 feedEl.addEventListener('click', async function(e) {
+  // 1. Image lightbox
   const clickedImg = e.target.closest('.post-img');
   if (clickedImg) {
     const lightbox = document.getElementById('imageLightbox');
     const lightboxImg = document.getElementById('lightboxImg');
-    lightboxImg.src = clickedImg.src; // Copy the image URL
-    lightbox.style.display = 'flex';  // Show the viewer
-    document.body.style.overflow = 'hidden'; // Stop background scrolling
-    return; // Stop here so it doesn't trigger other clicks
+    if (lightbox && lightboxImg) {
+      lightboxImg.src = clickedImg.src;
+      lightbox.style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+    }
+    return;
   }
-  
+
+  // 2. Post body expand/collapse
   const postBody = e.target.closest('.post-body');
   if (postBody) {
-    postBody.classList.toggle('expanded'); // Expands or shrinks on tap
-    return; // Stop here so it doesn't trigger likes/comments
+    postBody.classList.toggle('expanded');
+    return;
   }
+
+  // 3. Action buttons
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const card = btn.closest('.post');
   if (!card) return;
   const id = card.dataset.id;
   const action = btn.dataset.action;
+
   if (action === 'like') await toggleLike(btn, id);
   else if (action === 'comment') await openComments(id);
   else if (action === 'follow') await toggleFollow(btn);
+  else if (action === 'share') await sharePost(id);
+  else if (action === 'delete') await deletePost(id, card);
 });
+
+// ═══ DELETE POST ═══
+async function deletePost(postId, card) {
+  if (!confirm('Delete this post? This cannot be undone.')) return;
+
+  // Disable the button during the request
+  const btn = card.querySelector('[data-action="delete"]');
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+  }
+
+  try {
+    const res = await fetch('/api/posts/' + postId, {
+      method: 'DELETE',
+      credentials: 'same-origin'
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Server error ' + res.status);
+    }
+
+    // Animate out and remove
+    card.style.transition = 'opacity 0.3s, transform 0.3s';
+    card.style.opacity = '0';
+    card.style.transform = 'scale(0.95)';
+    setTimeout(function() { card.remove(); }, 320);
+  } catch (err) {
+    alert('Could not delete post: ' + err.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.style.opacity = '';
+    }
+  }
+}
+
+// ═══ SHARE POST ═══
+async function sharePost(postId) {
+  const url = window.location.origin + '/user/' + postId;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'KAMUPUS', text: 'Check this out on KAMUPUS', url: url });
+    } catch (e) { /* user cancelled */ }
+  } else if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(url);
+      alert('Link copied to clipboard');
+    } catch (e) {
+      alert('Could not copy link');
+    }
+  } else {
+    alert(url);
+  }
+}
 
 async function toggleLike(btn, postId) {
   const wasLiked = btn.classList.contains('liked');
@@ -374,33 +453,31 @@ async function submitPost() {
   isPosting = true;
   postBtnEl.disabled = true;
   postBtnEl.textContent = 'Posting…';
-  
+
   const fd = new FormData();
   fd.append('content', content);
   fd.append('anonymous', isAnon ? 'true' : 'false');
   fd.append('tag', isAnon ? 'anon' : 'gist');
   if (hasImg) fd.append('image', composerFile.files[0]);
-  
+
   try {
     const res = await fetch('/api/posts', { method: 'POST', body: fd, credentials: 'same-origin' });
-    
-    // THIS IS THE NEW PART: Catch the exact error from Flask
+
     if (!res.ok) {
       let errorMsg = 'Unknown error';
       try {
         const errorData = await res.json();
         errorMsg = errorData.error || 'Server rejected the post';
-      } catch(err) {
+      } catch (err) {
         errorMsg = 'Server error (' + res.status + ')';
       }
       throw new Error(errorMsg);
     }
-    
+
     closeComposer();
     await loadFeed(currentFilter);
   } catch (e) {
-    // THIS IS THE NEW PART: Show the exact error
-    alert('Why it failed: ' + e.message); 
+    alert('Upload failed: ' + e.message);
     postBtnEl.disabled = false;
   } finally {
     isPosting = false;
@@ -576,11 +653,11 @@ document.addEventListener('keydown', function(e) {
 // Close the full screen image when clicked
 const lightbox = document.getElementById('imageLightbox');
 if (lightbox) {
-    lightbox.addEventListener('click', function() {
-        this.style.display = 'none';
-        document.getElementById('lightboxImg').src = '';
-        document.body.style.overflow = ''; // Bring back scrolling
-    });
+  lightbox.addEventListener('click', function() {
+    this.style.display = 'none';
+    document.getElementById('lightboxImg').src = '';
+    document.body.style.overflow = '';
+  });
 }
 
 loadFeed();
