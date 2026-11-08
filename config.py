@@ -14,8 +14,10 @@ class Config:
     SECRET_KEY = env_or('SECRET_KEY', 'fundar-dev-secret-change-in-prod')
 
     db_url = env_or('DATABASE_URL', '')
-    if db_url and db_url.startswith('postgres://'):
-        db_url = db_url.replace('postgres://', 'postgresql://', 1)
+if db_url and db_url.startswith('postgres://'):
+    db_url = db_url.replace('postgres://', 'postgresql+psycopg://', 1)
+elif db_url and db_url.startswith('postgresql://'):
+    db_url = db_url.replace('postgresql://', 'postgresql+psycopg://', 1)
 
     if db_url:
         SQLALCHEMY_DATABASE_URI = db_url
