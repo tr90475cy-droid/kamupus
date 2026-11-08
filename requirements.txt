@@ -13,15 +13,12 @@ simple-websocket==1.0.0
 # Production server
 gunicorn==21.2.0
 
-# Database
+# Database (PostgreSQL for Supabase)
 psycopg2-binary>=2.9.10
 
 # Environment & HTTP
 python-dotenv==1.0.0
 requests==2.31.0
-
-# File storage (Supabase)
-supabase==2.7.4
 
 # Image processing
 Pillow==11.0.0
