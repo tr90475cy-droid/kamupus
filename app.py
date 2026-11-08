@@ -1,4 +1,12 @@
 import os
+
+# 1. Load .env FIRST, before anything else reads environment variables
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import json
 import uuid
 import requests
@@ -17,12 +25,30 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     Follow, ProfileView, AdminAction, AdPayment)
 from ai_check import analyze_image
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+# ─────────────────────────────────────────────
+# SUPABASE STORAGE SETUP
+# ─────────────────────────────────────────────
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '') or os.environ.get('SUPABASE_KEY', '')
+SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
 
+supabase = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        from supabase import create_client
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print('✓ Supabase Storage configured')
+    except ImportError:
+        print('⚠ supabase package not installed — uploads disabled')
+    except Exception as e:
+        print(f'⚠ Supabase init failed: {e}')
+else:
+    print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
+
+# ─────────────────────────────────────────────
+# APP SETUP
+# ─────────────────────────────────────────────
 app = Flask(__name__)
 app.config.from_object(Config)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -72,26 +98,6 @@ for _name in ('gunicorn.error', 'gunicorn.access',
     logging.getLogger(_name).addFilter(_DropDisconnectedSession())
 
 # ─────────────────────────────────────────────
-# SUPABASE STORAGE
-# ─────────────────────────────────────────────
-from supabase import create_client
-
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
-SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'kamupus-uploads')
-
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print('✓ Supabase storage configured')
-    except Exception as e:
-        print(f'⚠ Supabase init failed: {e}')
-        supabase = None
-else:
-    supabase = None
-    print('⚠ Supabase storage not configured — ALL uploads will be rejected')
-
-# ─────────────────────────────────────────────
 # AD PRICING
 # ─────────────────────────────────────────────
 AD_PRICING = [
@@ -102,19 +108,16 @@ AD_PRICING = [
     {'days': 30, 'price': 3000, 'per_day': 100, 'label': 'Full month',   'saving': 3000},
 ]
 
-
 def get_ad_price(days):
     for tier in AD_PRICING:
         if tier['days'] == days:
             return tier['price']
     return days * 200
 
-
 def generate_ref(prefix):
     u = current_user()
     uid = u.id if u else 0
     return f'KAMUPUS-{prefix}-{uid}-{int(datetime.utcnow().timestamp())}'
-
 
 # ─────────────────────────────────────────────
 # JINJA FILTERS
@@ -126,33 +129,31 @@ def fromjson_filter(s):
     except (ValueError, TypeError):
         return []
 
-
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-
 def allowed_image(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'webp'}
-
 
 def current_user():
     uid = session.get('user_id')
     return db.session.get(User, uid) if uid else None
 
-
-def user_avatar(user):
-    if not user:
-        return None
-    path = getattr(user, 'profile_picture_path', None)
+def get_file_url(path):
+    """Helper to safely return either a Supabase URL or a legacy local file URL."""
     if not path:
         return None
     if path.startswith('http'):
         return path
     return url_for('uploaded_file', filename=path)
 
+def user_avatar(user):
+    if not user:
+        return None
+    return get_file_url(getattr(user, 'profile_picture_path', None))
 
 def login_required(f):
     @wraps(f)
@@ -161,7 +162,6 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*a, **k)
     return w
-
 
 def verified_required(f):
     @wraps(f)
@@ -174,12 +174,20 @@ def verified_required(f):
         return f(*a, **k)
     return w
 
+# ─────────────────────────────────────────────
+# SUPABASE UPLOAD & DELETE
+# ─────────────────────────────────────────────
+_last_upload_error = None
 
 def save_upload(file, prefix):
     """Upload a file to Supabase Storage. Returns the public URL, or None on failure.
-    NEVER falls back to local disk."""
+    Sets _last_upload_error so the caller can return the real reason."""
+    global _last_upload_error
+    _last_upload_error = None
+
     if not supabase:
-        print('[UPLOAD] Supabase not configured — upload rejected')
+        _last_upload_error = 'Supabase client not initialized (check env vars + supabase package)'
+        print(f'[UPLOAD] {_last_upload_error}')
         return None
 
     content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
@@ -189,7 +197,13 @@ def save_upload(file, prefix):
     try:
         file_bytes = file.read()
     except Exception as e:
-        print(f'[UPLOAD] Could not read file: {e}')
+        _last_upload_error = f'Could not read file: {e}'
+        print(f'[UPLOAD] {_last_upload_error}')
+        return None
+
+    if not file_bytes:
+        _last_upload_error = 'File is empty (0 bytes)'
+        print(f'[UPLOAD] {_last_upload_error}')
         return None
 
     try:
@@ -199,20 +213,20 @@ def save_upload(file, prefix):
             file_options={'content-type': content_type, 'upsert': 'false'},
         )
         if hasattr(res, 'error') and res.error:
-            print(f'[SUPABASE UPLOAD ERROR] {res.error}')
+            _last_upload_error = f'Supabase error: {res.error}'
+            print(f'[SUPABASE UPLOAD ERROR] {_last_upload_error}')
             return None
         return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
     except Exception as e:
-        print(f'[SUPABASE UPLOAD EXCEPTION] {e}')
+        _last_upload_error = f'{type(e).__name__}: {e}'
+        print(f'[SUPABASE UPLOAD EXCEPTION] {_last_upload_error}')
         return None
-
 
 def delete_upload(path):
     """Delete a file from Supabase Storage. Ignores legacy local paths."""
     if not path or not supabase:
         return
     if not isinstance(path, str) or not path.startswith('http'):
-        # Legacy local filename — nothing to delete on Supabase side
         return
     try:
         marker = f'/public/{SUPABASE_BUCKET}/'
@@ -222,7 +236,6 @@ def delete_upload(path):
     except Exception as e:
         print(f'[SUPABASE DELETE ERROR] {e}')
 
-
 def time_ago(dt):
     if not dt:
         return 'now'
@@ -231,7 +244,6 @@ def time_ago(dt):
     if secs < 3600: return f'{secs // 60}m'
     if secs < 86400: return f'{secs // 3600}h'
     return f'{secs // 86400}d'
-
 
 # ─────────────────────────────────────────────
 # ADMIN SECURITY
@@ -246,10 +258,8 @@ def admin_session_expired():
     except (ValueError, TypeError):
         return True
 
-
 def touch_admin_session():
     session['admin_last_seen'] = datetime.utcnow().isoformat()
-
 
 def log_admin_action(action, target_user_id=None, detail=''):
     u = current_user()
@@ -262,7 +272,6 @@ def log_admin_action(action, target_user_id=None, detail=''):
     db.session.add(log)
     db.session.commit()
 
-
 def is_admin_unlocked():
     u = current_user()
     if not u or u.role != 'admin':
@@ -274,7 +283,6 @@ def is_admin_unlocked():
         session.pop('admin_last_seen', None)
         return False
     return True
-
 
 # ─────────────────────────────────────────────
 # ROOT
@@ -289,7 +297,6 @@ def index():
     if u.verification_status == 'verified':
         return redirect(url_for('home'))
     return redirect(url_for('pending'))
-
 
 # ─────────────────────────────────────────────
 # AUTH
@@ -325,7 +332,6 @@ def signup():
 
     return render_template('signup.html', form={})
 
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -340,12 +346,10 @@ def login():
         return redirect(url_for('index'))
     return render_template('login.html')
 
-
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('login'))
-
 
 # ─────────────────────────────────────────────
 # VERIFICATION
@@ -388,8 +392,6 @@ def verify():
             flash('This matric number is already registered', 'error')
             return render_template('verify.html', form=request.form)
 
-        # AI check needs a real file path — write to temp, run check, delete immediately
-        # (this is NOT storage fallback, just a temp file for image analysis)
         file_bytes = file.read()
         local_name = secure_filename(f"verify_{u.id}_{int(datetime.utcnow().timestamp())}_{file.filename}")
         local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_name)
@@ -406,7 +408,6 @@ def verify():
             flash(f'Upload rejected — appears AI-generated ({int(score)}%). Please upload a real photo.', 'error')
             return render_template('verify.html', form=request.form)
 
-        # Upload to Supabase using a temp wrapper
         class _TmpFile:
             def __init__(self, filename, content_type, data):
                 self.filename = filename
@@ -442,7 +443,6 @@ def verify():
 
     return render_template('verify.html', form={})
 
-
 @app.route('/pending')
 @login_required
 def pending():
@@ -452,7 +452,6 @@ def pending():
     v = StudentVerification.query.filter_by(user_id=u.id).first()
     return render_template('pending.html', user=u, verification=v)
 
-
 # ─────────────────────────────────────────────
 # HOME
 # ─────────────────────────────────────────────
@@ -460,7 +459,6 @@ def pending():
 @verified_required
 def home():
     return render_template('home.html', user=current_user())
-
 
 # ─────────────────────────────────────────────
 # FEED
@@ -478,10 +476,9 @@ def serialize_post(p, me_id):
         'id': p.id, 'user_id': user_id, 'author': author, 'avatar': avatar,
         'anonymous': p.anonymous, 'verified': not p.anonymous,
         'time': time_ago(p.created_at), 'tag': p.tag, 'content': p.content,
-        'image': p.image_path if p.image_path else None,
+        'image': get_file_url(p.image_path),
         'likes': len(p.likes), 'comments': len(p.comments), 'liked': liked,
     }
-
 
 @app.route('/api/feed')
 @verified_required
@@ -534,7 +531,6 @@ def api_feed():
     posts.sort(key=score, reverse=True)
     return jsonify([serialize_post(p, me.id) for p in posts[:100]])
 
-
 @app.route('/api/posts', methods=['POST'])
 @verified_required
 def api_create_post():
@@ -544,10 +540,13 @@ def api_create_post():
         tag = request.form.get('tag') or ('anon' if anon else 'gist')
         image = request.files.get('image')
         image_path = None
-        if image and image.filename and allowed_image(image.filename):
+                if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'post{current_user().id}')
             if not image_path:
-                return jsonify({'error': 'Image upload failed'}), 500
+                return jsonify({
+                    'error': 'Image upload failed',
+                    'reason': _last_upload_error or 'unknown',
+                }), 500
     else:
         d = request.get_json() or {}
         content = (d.get('content') or '').strip()
@@ -564,7 +563,6 @@ def api_create_post():
     db.session.commit()
     return jsonify(serialize_post(p, current_user().id))
 
-
 @app.route('/api/posts/<int:pid>/like', methods=['POST'])
 @verified_required
 def api_like(pid):
@@ -577,7 +575,6 @@ def api_like(pid):
         db.session.add(Like(user_id=me, post_id=pid)); liked = True
     db.session.commit()
     return jsonify({'liked': liked, 'likes': len(p.likes)})
-
 
 @app.route('/api/posts/<int:pid>/comments', methods=['GET', 'POST'])
 @verified_required
@@ -601,12 +598,10 @@ def api_comments(pid):
         'content': c.content, 'time': time_ago(c.created_at),
     } for c in p.comments])
 
-
 @app.route('/uploads/<path:filename>')
 @login_required
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
 
 # ─────────────────────────────────────────────
 # MARKETPLACE
@@ -615,7 +610,6 @@ def uploaded_file(filename):
 @verified_required
 def market():
     return render_template('market.html', user=current_user())
-
 
 def serialize_listing(l, me_id):
     now = datetime.utcnow()
@@ -628,7 +622,7 @@ def serialize_listing(l, me_id):
     return {
         'id': l.id, 'title': l.title, 'description': l.description,
         'price': l.price, 'category': l.category,
-        'image': l.image_path if l.image_path else None,
+        'image': get_file_url(l.image_path),
         'sold': l.sold,
         'seller': seller.full_name, 'seller_id': seller.id,
         'seller_verified': seller.verification_status == 'verified',
@@ -639,7 +633,6 @@ def serialize_listing(l, me_id):
         'days_remaining': days_left,
         'featured_amount_paid': l.featured_amount_paid or 0,
     }
-
 
 @app.route('/api/listings', methods=['GET', 'POST'])
 @verified_required
@@ -686,13 +679,11 @@ def api_listings():
     ))
     return jsonify([serialize_listing(l, me.id) for l in listings])
 
-
 @app.route('/api/listings/<int:lid>')
 @verified_required
 def api_listing_single(lid):
     l = Listing.query.get_or_404(lid)
     return jsonify(serialize_listing(l, current_user().id))
-
 
 @app.route('/api/listings/<int:lid>/sold', methods=['POST'])
 @verified_required
@@ -703,7 +694,6 @@ def api_listing_sold(lid):
     l.sold = not l.sold
     db.session.commit()
     return jsonify({'sold': l.sold})
-
 
 # ─────────────────────────────────────────────
 # FLUTTERWAVE — Marketplace checkout
@@ -765,7 +755,6 @@ def buy_listing(listing_id):
         print(f'[FLW BUY] {e}')
         return jsonify({'error': 'Payment initialization failed'}), 500
 
-
 @app.route('/flutterwave/webhook', methods=['POST'])
 def flutterwave_webhook():
     incoming = request.headers.get('verif-hash', '')
@@ -797,15 +786,13 @@ def flutterwave_webhook():
 
     return 'ok', 200
 
-
 # ─────────────────────────────────────────────
-# AD PROMOTION — manual OPay + admin activation
+# AD PROMOTION
 # ─────────────────────────────────────────────
 @app.route('/api/ads/pricing')
 @verified_required
 def api_ads_pricing():
     return jsonify(AD_PRICING)
-
 
 @app.route('/api/market/promote/<int:listing_id>', methods=['POST'])
 @verified_required
@@ -846,7 +833,6 @@ def api_promote_listing(listing_id):
         'account_name': AD_PAYMENT_NAME,
     })
 
-
 # ─────────────────────────────────────────────
 # ADMIN — ad payment activation
 # ─────────────────────────────────────────────
@@ -865,7 +851,6 @@ def admin_ads():
         .order_by(AdPayment.approved_at.desc()).limit(30).all()
 
     return render_template('admin_ads.html', pending=pending, recent=recent)
-
 
 @app.route(app.config['ADMIN_PATH'] + '/ads/<int:pid>/approve', methods=['POST'])
 def admin_ads_approve(pid):
@@ -902,7 +887,6 @@ def admin_ads_approve(pid):
     flash(f'Ad activated for {payment.days} days', 'success')
     return redirect(url_for('admin_ads'))
 
-
 @app.route(app.config['ADMIN_PATH'] + '/ads/<int:pid>/reject', methods=['POST'])
 def admin_ads_reject(pid):
     u = current_user()
@@ -923,22 +907,18 @@ def admin_ads_reject(pid):
     flash('Ad payment rejected', 'success')
     return redirect(url_for('admin_ads'))
 
-
 # ─────────────────────────────────────────────
 # ASSIGNMENTS
 # ─────────────────────────────────────────────
 ALLOWED_ASSIGNMENT_FILES = {'png', 'jpg', 'jpeg', 'webp', 'pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt'}
 
-
 def allowed_assignment_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_ASSIGNMENT_FILES
-
 
 @app.route('/assignments')
 @verified_required
 def assignments():
     return render_template('assignments.html', user=current_user())
-
 
 @app.route('/api/assignments', methods=['GET', 'POST'])
 @verified_required
@@ -990,7 +970,6 @@ def api_assignments():
     q = Assignment.query.filter_by(user_id=me.id).order_by(Assignment.due_date.asc())
     return jsonify([serialize_assignment(a) for a in q.all()])
 
-
 def serialize_assignment(a):
     now = datetime.utcnow()
     overdue = a.due_date < now and not a.completed
@@ -1007,11 +986,10 @@ def serialize_assignment(a):
         'due_date': a.due_date.isoformat(),
         'due_label': a.due_date.strftime('%b %d, %I:%M %p'),
         'completed': a.completed, 'urgency': urgency,
-        'attachment_url': a.attachment_path if a.attachment_path else None,
+        'attachment_url': get_file_url(a.attachment_path),
         'attachment_name': a.attachment_name,
         'has_image': bool(a.attachment_path and a.attachment_path.lower().rsplit('.', 1)[-1] in {'png', 'jpg', 'jpeg', 'webp'}),
     }
-
 
 @app.route('/api/assignments/<int:aid>/toggle', methods=['POST'])
 @verified_required
@@ -1021,7 +999,6 @@ def api_assignment_toggle(aid):
     a.completed = not a.completed
     db.session.commit()
     return jsonify(serialize_assignment(a))
-
 
 @app.route('/api/assignments/<int:aid>', methods=['DELETE'])
 @verified_required
@@ -1034,7 +1011,6 @@ def api_assignment_delete(aid):
     db.session.commit()
     return jsonify({'ok': True})
 
-
 # ─────────────────────────────────────────────
 # EVENTS / PARTIES
 # ─────────────────────────────────────────────
@@ -1042,7 +1018,6 @@ def api_assignment_delete(aid):
 @verified_required
 def parties():
     return render_template('parties.html', user=current_user())
-
 
 @app.route('/api/events', methods=['GET', 'POST'])
 @verified_required
@@ -1078,18 +1053,16 @@ def api_events():
     events = Event.query.order_by(Event.starts_at.asc()).limit(50).all()
     return jsonify([serialize_event(e, me.id) for e in events])
 
-
 def serialize_event(e, me_id):
     going = any(r.user_id == me_id for r in e.rsvps)
     return {
         'id': e.id, 'title': e.title, 'description': e.description, 'venue': e.venue,
         'starts_at': e.starts_at.isoformat(),
         'starts_label': e.starts_at.strftime('%a, %b %d · %I:%M %p'),
-        'image': e.image_path if e.image_path else None,
+        'image': get_file_url(e.image_path),
         'host': e.host.full_name, 'host_id': e.host.id,
         'rsvp_count': len(e.rsvps), 'going': going, 'mine': e.user_id == me_id,
     }
-
 
 @app.route('/api/events/<int:eid>/rsvp', methods=['POST'])
 @verified_required
@@ -1104,7 +1077,6 @@ def api_event_rsvp(eid):
     db.session.commit()
     return jsonify({'going': going, 'rsvp_count': len(e.rsvps)})
 
-
 # ─────────────────────────────────────────────
 # CHAT
 # ─────────────────────────────────────────────
@@ -1113,10 +1085,8 @@ def api_event_rsvp(eid):
 def chat():
     return render_template('chat.html', user=current_user())
 
-
 def dm_key_for(a, b):
     return '-'.join(map(str, sorted([a, b])))
-
 
 def serialize_room_for(r, me):
     last_msg = r.messages[-1] if r.messages else None
@@ -1136,7 +1106,6 @@ def serialize_room_for(r, me):
         'member_count': len(r.members),
     }
 
-
 @app.route('/api/chat/rooms', methods=['GET'])
 @verified_required
 def api_chat_rooms_list():
@@ -1145,7 +1114,6 @@ def api_chat_rooms_list():
     rooms_data = [serialize_room_for(r, me) for r in rooms]
     rooms_data.sort(key=lambda r: r['last_time'], reverse=True)
     return jsonify(rooms_data)
-
 
 @app.route('/api/chat/group', methods=['POST'])
 @verified_required
@@ -1168,7 +1136,6 @@ def api_chat_group_create():
             db.session.add(ChatMember(room_id=room.id, user_id=uid))
     db.session.commit()
     return jsonify({'id': room.id, 'name': room.name, 'is_group': True})
-
 
 @app.route('/api/chat/dm/<int:user_id>', methods=['POST'])
 @verified_required
@@ -1199,7 +1166,6 @@ def api_chat_dm_open(user_id):
                     'avatar': user_avatar(target), 'is_group': False,
                     'other_user_id': target.id})
 
-
 @app.route('/api/chat/rooms/<int:rid>/messages')
 @verified_required
 def api_chat_messages(rid):
@@ -1212,7 +1178,6 @@ def api_chat_messages(rid):
         'author': m.user.full_name, 'avatar': user_avatar(m.user),
         'mine': m.user_id == me, 'time': m.created_at.strftime('%I:%M %p'),
     } for m in room.messages])
-
 
 # ─────────────────────────────────────────────
 # USER SEARCH
@@ -1252,7 +1217,6 @@ def api_users_search():
         })
     return jsonify(result)
 
-
 @app.route('/api/users')
 @verified_required
 def api_users():
@@ -1262,7 +1226,6 @@ def api_users():
     return jsonify([{
         'id': u.id, 'name': u.full_name, 'email': u.email, 'avatar': user_avatar(u),
     } for u in users])
-
 
 # ─────────────────────────────────────────────
 # PROFILE
@@ -1283,7 +1246,6 @@ def me():
                            connection_count=connection_count,
                            avatar=user_avatar(u))
 
-
 @app.route('/api/me', methods=['PATCH'])
 @verified_required
 def api_me_update():
@@ -1303,14 +1265,12 @@ def api_me_update():
         'whatsapp_number': getattr(u, 'whatsapp_number', '') or '',
     })
 
-
 @app.route('/api/me/posts')
 @verified_required
 def api_my_posts():
     me = current_user()
     posts = Post.query.filter_by(user_id=me.id).order_by(Post.created_at.desc()).limit(50).all()
     return jsonify([serialize_post(p, me.id) for p in posts])
-
 
 @app.route('/api/me/picture', methods=['POST'])
 @verified_required
@@ -1332,7 +1292,6 @@ def api_me_picture():
     db.session.commit()
     return jsonify({'ok': True, 'avatar': user_avatar(u)})
 
-
 @app.route('/api/me/picture', methods=['DELETE'])
 @verified_required
 def api_me_picture_delete():
@@ -1343,7 +1302,6 @@ def api_me_picture_delete():
         db.session.commit()
     return jsonify({'ok': True})
 
-
 # ─────────────────────────────────────────────
 # CONNECT
 # ─────────────────────────────────────────────
@@ -1351,7 +1309,6 @@ def api_me_picture_delete():
 @verified_required
 def connect():
     return render_template('connect.html', user=current_user())
-
 
 def serialize_connection_user(u, connection_status=None, connection_id=None):
     return {
@@ -1362,7 +1319,6 @@ def serialize_connection_user(u, connection_status=None, connection_id=None):
         'level': u.verification.level if u.verification else '',
         'status': connection_status, 'connection_id': connection_id,
     }
-
 
 @app.route('/api/connect/suggestions')
 @verified_required
@@ -1393,7 +1349,6 @@ def api_connect_suggestions():
     candidates.sort(key=score)
     return jsonify([serialize_connection_user(u) for u in candidates[:50]])
 
-
 @app.route('/api/connect/requests')
 @verified_required
 def api_connect_requests():
@@ -1404,7 +1359,6 @@ def api_connect_requests():
         'incoming': [serialize_connection_user(c.requester, 'incoming', c.id) for c in incoming],
         'outgoing': [serialize_connection_user(c.recipient, 'outgoing', c.id) for c in outgoing],
     })
-
 
 @app.route('/api/connect/send/<int:user_id>', methods=['POST'])
 @verified_required
@@ -1435,7 +1389,6 @@ def api_connect_send(user_id):
     db.session.commit()
     return jsonify({'ok': True, 'status': 'pending', 'connection_id': conn.id})
 
-
 @app.route('/api/connect/accept/<int:cid>', methods=['POST'])
 @verified_required
 def api_connect_accept(cid):
@@ -1446,7 +1399,6 @@ def api_connect_accept(cid):
     db.session.commit()
     return jsonify({'ok': True})
 
-
 @app.route('/api/connect/decline/<int:cid>', methods=['POST'])
 @verified_required
 def api_connect_decline(cid):
@@ -1456,7 +1408,6 @@ def api_connect_decline(cid):
     db.session.delete(c)
     db.session.commit()
     return jsonify({'ok': True})
-
 
 @app.route('/api/connect/mine')
 @verified_required
@@ -1471,7 +1422,6 @@ def api_connect_mine():
         other = c.recipient if c.requester_id == me else c.requester
         result.append(serialize_connection_user(other, 'connected', c.id))
     return jsonify(result)
-
 
 # ─────────────────────────────────────────────
 # FOLLOW
@@ -1491,7 +1441,6 @@ def api_follow(uid):
         'followers': Follow.query.filter_by(following_id=uid).count(),
     })
 
-
 @app.route('/api/users/<int:uid>/follow', methods=['DELETE'])
 @verified_required
 def api_unfollow(uid):
@@ -1505,7 +1454,6 @@ def api_unfollow(uid):
         'followers': Follow.query.filter_by(following_id=uid).count(),
     })
 
-
 @app.route('/api/users/<int:uid>/follow-status')
 @verified_required
 def api_follow_status(uid):
@@ -1516,7 +1464,6 @@ def api_follow_status(uid):
         'followers': Follow.query.filter_by(following_id=uid).count(),
         'following_count': Follow.query.filter_by(follower_id=uid).count(),
     })
-
 
 # ─────────────────────────────────────────────
 # PUBLIC USER PROFILE
@@ -1551,7 +1498,6 @@ def user_profile(uid):
                            following_count=following_count, is_following=is_following,
                            avatar=user_avatar(target))
 
-
 @app.route('/api/user/<int:uid>/posts')
 @verified_required
 def api_user_posts(uid):
@@ -1560,7 +1506,6 @@ def api_user_posts(uid):
         .order_by(Post.created_at.desc()).limit(50).all()
     return jsonify([serialize_post(p, me) for p in posts])
 
-
 @app.route('/api/me/following')
 @verified_required
 def api_me_following():
@@ -1568,14 +1513,12 @@ def api_me_following():
     rows = Connection.query.filter_by(requester_id=me, status='accepted').all()
     return jsonify([serialize_connection_user(c.recipient, 'following', c.id) for c in rows])
 
-
 @app.route('/api/me/followers')
 @verified_required
 def api_me_followers():
     me = current_user().id
     rows = Connection.query.filter_by(recipient_id=me, status='accepted').all()
     return jsonify([serialize_connection_user(c.requester, 'follower', c.id) for c in rows])
-
 
 # ─────────────────────────────────────────────
 # ADMIN
@@ -1610,7 +1553,6 @@ def admin_login():
 
     return render_template('admin_login.html')
 
-
 def admin_view():
     u = current_user()
     if not u or u.role != 'admin':
@@ -1627,9 +1569,7 @@ def admin_view():
         .order_by(StudentVerification.reviewed_at.desc()).limit(20).all()
     return render_template('admin.html', pending=pending, recent=recent)
 
-
 app.add_url_rule(app.config['ADMIN_PATH'], 'admin', admin_view)
-
 
 @app.route(app.config['ADMIN_PATH'] + '/lock')
 def admin_lock():
@@ -1637,7 +1577,6 @@ def admin_lock():
     session.pop('admin_last_seen', None)
     flash('Admin locked', 'success')
     return redirect(url_for('admin_login'))
-
 
 @app.route(app.config['ADMIN_PATH'] + '/approve/<int:vid>', methods=['POST'])
 def admin_approve(vid):
@@ -1656,7 +1595,6 @@ def admin_approve(vid):
     log_admin_action('approve', target_user_id=v.user_id, detail=v.matric_no)
     flash(f'{v.user.full_name} approved', 'success')
     return redirect(url_for('admin'))
-
 
 @app.route(app.config['ADMIN_PATH'] + '/reject/<int:vid>', methods=['POST'])
 def admin_reject(vid):
@@ -1678,7 +1616,6 @@ def admin_reject(vid):
     flash(f'{v.user.full_name} rejected', 'success')
     return redirect(url_for('admin'))
 
-
 @app.route(app.config['ADMIN_PATH'] + '/log')
 def admin_log_view():
     u = current_user()
@@ -1687,7 +1624,6 @@ def admin_log_view():
     touch_admin_session()
     logs = AdminAction.query.order_by(AdminAction.created_at.desc()).limit(200).all()
     return render_template('admin_log.html', logs=logs)
-
 
 # ─────────────────────────────────────────────
 # WEBSOCKET
@@ -1701,12 +1637,10 @@ def ws_join(data):
     if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
     join_room(f'room_{rid}')
 
-
 @socketio.on('leave')
 def ws_leave(data):
     rid = data.get('room_id')
     if rid: leave_room(f'room_{rid}')
-
 
 @socketio.on('message')
 def ws_message(data):
@@ -1727,7 +1661,6 @@ def ws_message(data):
     }
     emit('message', payload, to=f'room_{rid}')
 
-
 # ─────────────────────────────────────────────
 # DEBUG
 # ─────────────────────────────────────────────
@@ -1742,14 +1675,12 @@ def api_debug_users():
         'whatsapp': getattr(u, 'whatsapp_number', '') or '',
     } for u in users])
 
-
 # ─────────────────────────────────────────────
 # INIT
 # ─────────────────────────────────────────────
 with app.app_context():
     db.create_all()
 
-    # Auto-migrate: add columns missing from legacy SQLite DBs (no-op for Postgres)
     if app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:///'):
         from sqlalchemy import inspect, text
         insp = inspect(db.engine)
@@ -1799,7 +1730,6 @@ with app.app_context():
             ))
             db.session.commit()
             print(f'✓ Admin created: {admin_email}')
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
