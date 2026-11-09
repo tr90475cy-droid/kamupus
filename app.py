@@ -31,18 +31,10 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '') or os.environ.get('SUPABASE_KEY', '')
 SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
 
-supabase = None
 _last_upload_error = None
 
 if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        from supabase import create_client
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print('✓ Supabase Storage configured')
-    except ImportError:
-        print('⚠ supabase package not installed — uploads disabled')
-    except Exception as e:
-        print(f'⚠ Supabase init failed: {e}')
+    print('✓ Supabase Storage configured (via direct HTTPS API)')
 else:
     print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
 
@@ -174,12 +166,16 @@ def verified_required(f):
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
 def save_upload(file, prefix):
-    """Upload to Supabase. Returns public URL on success, None on failure."""
+    """Upload to Supabase Storage via direct HTTPS API (avoids supabase-py bugs).
+
+    Returns the public URL on success, None on failure.
+    The actual error is stored in _last_upload_error for the caller.
+    """
     global _last_upload_error
     _last_upload_error = None
 
-    if not supabase:
-        _last_upload_error = 'Supabase client not initialized'
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        _last_upload_error = 'Supabase not configured (SUPABASE_URL/SUPABASE_SERVICE_KEY missing)'
         print(f'❌ [UPLOAD] {_last_upload_error}')
         return None
 
@@ -200,33 +196,63 @@ def save_upload(file, prefix):
         return None
 
     try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(
-            path=unique_name,
-            file=file_bytes,
-            file_options={'content-type': content_type, 'upsert': 'false'},
+        base = SUPABASE_URL.rstrip('/')
+        upload_url = f'{base}/storage/v1/object/{SUPABASE_BUCKET}/{unique_name}'
+
+        res = requests.post(
+            upload_url,
+            headers={
+                'Authorization': f'Bearer {SUPABASE_KEY}',
+                'Content-Type': content_type,
+                'x-upsert': 'false',
+            },
+            data=file_bytes,
+            timeout=30,
         )
-        url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(unique_name)
-        print(f'✓ [UPLOAD] {unique_name}')
-        return url
+
+        if res.status_code >= 400:
+            _last_upload_error = f'HTTP {res.status_code}: {res.text[:200]}'
+            print(f'❌ [SUPABASE UPLOAD] {_last_upload_error}')
+            return None
+
+        public_url = f'{base}/storage/v1/object/public/{SUPABASE_BUCKET}/{unique_name}'
+        print(f'✓ [UPLOAD] {unique_name} → {public_url[:60]}...')
+        return public_url
+
     except Exception as e:
         _last_upload_error = f'{type(e).__name__}: {e}'
         print(f'❌ [SUPABASE UPLOAD EXCEPTION] {_last_upload_error}')
         return None
 
+
 def delete_upload(path):
-    """Delete a file from Supabase Storage. Ignores legacy local paths."""
-    if not path or not supabase:
+    """Delete a file from Supabase Storage via direct HTTPS API.
+
+    Silently no-ops on legacy local paths (paths not starting with http).
+    """
+    if not path or not SUPABASE_URL or not SUPABASE_KEY:
         return
     if not isinstance(path, str) or not path.startswith('http'):
         return
     try:
         marker = f'/public/{SUPABASE_BUCKET}/'
-        if marker in path:
-            key = path.split(marker, 1)[1]
-            supabase.storage.from_(SUPABASE_BUCKET).remove([key])
+        if marker not in path:
+            return
+        key = path.split(marker, 1)[1]
+        base = SUPABASE_URL.rstrip('/')
+        delete_url = f'{base}/storage/v1/object/{SUPABASE_BUCKET}/{key}'
+
+        res = requests.delete(
+            delete_url,
+            headers={'Authorization': f'Bearer {SUPABASE_KEY}'},
+            timeout=30,
+        )
+        if res.status_code >= 400:
+            print(f'⚠ [DELETE] HTTP {res.status_code}: {res.text[:100]}')
+        else:
             print(f'✓ [DELETE] {key}')
     except Exception as e:
-        print(f'⚠ [SUPABASE DELETE ERROR] {e}')
+        print(f'⚠ [SUPABASE DELETE EXCEPTION] {type(e).__name__}: {e}')
 
 def time_ago(dt):
     if not dt:
@@ -1786,23 +1812,30 @@ def api_debug_users():
 @app.route('/api/debug/supabase')
 @login_required
 def debug_supabase():
-    # FIX #6: require login (was fully public)
     result = {
         'env_url_set': bool(SUPABASE_URL),
         'env_key_set': bool(SUPABASE_KEY),
         'bucket_name': SUPABASE_BUCKET,
-        'supabase_client': supabase is not None,
     }
-    if supabase is None:
-        result['error'] = 'Client not initialized'
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        result['error'] = 'Supabase not configured (env vars missing)'
         return jsonify(result), 500
+
     try:
-        buckets = supabase.storage.list_buckets()
-        names = [b.name for b in buckets]
-        result['available_buckets'] = names
-        result['bucket_exists'] = SUPABASE_BUCKET in names
+        base = SUPABASE_URL.rstrip('/')
+        check_url = f'{base}/storage/v1/bucket/{SUPABASE_BUCKET}'
+        res = requests.get(
+            check_url,
+            headers={'Authorization': f'Bearer {SUPABASE_KEY}'},
+            timeout=10,
+        )
+        result['bucket_status_code'] = res.status_code
+        result['bucket_exists'] = (res.status_code == 200)
+        if res.status_code >= 400:
+            result['error'] = res.text[:200]
     except Exception as e:
         result['error'] = f'{type(e).__name__}: {e}'
+
     return jsonify(result)
 
 # ─────────────────────────────────────────────
@@ -1837,18 +1870,25 @@ with app.app_context():
                         print(f'✓ auto-migrate: {table}.{col}')
 
     # Verify Supabase bucket exists at startup
-    if supabase:
+        # Verify Supabase bucket exists at startup (uses requests, not supabase-py)
+    if SUPABASE_URL and SUPABASE_KEY:
         try:
-            buckets = supabase.storage.list_buckets()
-            names = [b.name for b in buckets]
-            if SUPABASE_BUCKET not in names:
+            base = SUPABASE_URL.rstrip('/')
+            check_url = f'{base}/storage/v1/bucket/{SUPABASE_BUCKET}'
+            res = requests.get(
+                check_url,
+                headers={'Authorization': f'Bearer {SUPABASE_KEY}'},
+                timeout=10,
+            )
+            if res.status_code == 200:
+                print(f'✓ Supabase bucket "{SUPABASE_BUCKET}" ready')
+            elif res.status_code == 404:
                 print(f'⚠ Supabase bucket "{SUPABASE_BUCKET}" not found!')
-                print(f'  Available: {names}')
                 print(f'  → Create it in Supabase dashboard → Storage')
             else:
-                print(f'✓ Supabase bucket "{SUPABASE_BUCKET}" ready')
+                print(f'⚠ Supabase bucket check: HTTP {res.status_code}: {res.text[:100]}')
         except Exception as e:
-            print(f'⚠ Could not verify Supabase bucket: {e}')
+            print(f'⚠ Could not verify Supabase bucket: {type(e).__name__}: {e}')
 
     admin_email = os.environ.get('ADMIN_EMAIL', 'oladipobright12@gmail.com')
     admin_pass = os.environ.get('ADMIN_PASSWORD', 'bright_kelvin*$')
@@ -1886,7 +1926,7 @@ if __name__ == '__main__':
     print(f'  ADMIN LOGIN: /admin-login')
     print(f'  ADMIN EMAIL: {os.environ.get("ADMIN_EMAIL", "oladipobright12@gmail.com")}')
     print(f'  FLW READY  : {"YES" if FLW_SECRET_KEY else "NO"}')
-    print(f'  SUPABASE   : {"YES" if supabase else "NO"}')
+    print(f'  SUPABASE   : {"YES" if (SUPABASE_URL and SUPABASE_KEY) else "NO"}')
     print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
