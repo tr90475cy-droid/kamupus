@@ -11,4 +11,4 @@ psycopg[binary]>=3.1.0
 python-dotenv==1.0.0
 requests==2.31.0
 Pillow==11.0.0
-supabase==2.7.4
+supabase==2.7.4psycopg2-binary>=2.9.10
