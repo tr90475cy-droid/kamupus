@@ -7,15 +7,13 @@
 <div class="app">
 
   <!-- ═══════════ HEADER ═══════════ -->
-  <header class="header">
-    <div class="header-brand">
-      <img src="{{ url_for('static', filename='logo.jpeg') }}" alt="KAMUPUS"
-           style="height:36px; width:36px; object-fit:contain; mix-blend-mode:screen; border-radius:8px;">
-      <div class="header-brand-text">
-        <div class="header-brand-name">Kamupus</div>
-        <div class="header-brand-sub">Lead City University</div>
-      </div>
-    </div>
+  <div style="padding: 16px 24px; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: space-between;">
+    <a href="/" style="display:flex; align-items:center; gap:10px; text-decoration:none;">
+        <img src="{{ url_for('static', filename='icon/logo.jpeg') }}" alt="KAMUPUS"
+             style="height:36px; width:36px; object-fit:contain; mix-blend-mode:screen;">
+        <span style="font-family:'Fraunces', serif; font-size:20px; font-weight:800; color:#fff;">KAMUPUS</span>
+    </a>
+</div>
 
     <div class="header-icons">
       <button class="icon-btn" id="searchBtn" aria-label="Search">
