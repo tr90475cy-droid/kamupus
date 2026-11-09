@@ -16,26 +16,36 @@ def env_or(key, default):
     return val if val else default
 
 
+def force_psycopg_v3(url):
+    """Force any Postgres URL to use psycopg v3 driver.
+    Handles all formats:
+      postgres://...                -> postgresql+psycopg://...
+      postgresql://...              -> postgresql+psycopg://...
+      postgresql+psycopg2://...     -> postgresql+psycopg://...
+      postgresql+psycopg://...      -> unchanged
+    """
+    if not url:
+        return url
+    if '://' not in url:
+        return url
+    tail = url.split('://', 1)[1]
+    return 'postgresql+psycopg://' + tail
+
+
 class Config:
     SECRET_KEY = env_or('SECRET_KEY', 'fundar-dev-secret-change-in-prod')
 
     # Database
     db_url = env_or('DATABASE_URL', '')
 
-    # Normalise to postgresql+psycopg:// (psycopg v3 driver)
-    if db_url and db_url.startswith('postgres://'):
-        db_url = db_url.replace('postgres://', 'postgresql+psycopg://', 1)
-    elif db_url and db_url.startswith('postgresql://'):
-        db_url = db_url.replace('postgresql://', 'postgresql+psycopg://', 1)
-
     if db_url:
-        SQLALCHEMY_DATABASE_URI = db_url
+        SQLALCHEMY_DATABASE_URI = force_psycopg_v3(db_url)
     else:
         SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(BASE_DIR, 'fundar.db')
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # Connection pool - fixes Neon/Supabase idle disconnects
+    # Connection pool - fixes Supabase/Neon idle disconnects
     SQLALCHEMY_ENGINE_OPTIONS = {
         'pool_pre_ping': True,
         'pool_recycle': 300,
