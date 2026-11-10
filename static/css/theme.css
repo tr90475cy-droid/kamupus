@@ -1132,3 +1132,49 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
   background: rgba(255,255,255,0.05);
   border-radius: 8px;
 }
+
+/* ── Profile preview modal ─────────────────────────── */
+.preview-body { padding: 16px 20px 24px; overflow-y: auto; }
+
+.preview-head { display: flex; gap: 14px; align-items: flex-start; }
+.preview-avatar {
+  width: 64px; height: 64px; border-radius: 50%;
+  object-fit: cover; flex-shrink: 0;
+  background: #1f2937; color: #9ca3af;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 700;
+}
+.preview-info { flex: 1; min-width: 0; }
+.preview-name { font-size: 18px; font-weight: 700; }
+.preview-meta { font-size: 13px; color: #9ca3af; margin-top: 2px; }
+.preview-bio  { font-size: 14px; margin-top: 8px; color: #d1d5db; line-height: 1.4; }
+
+.preview-stats {
+  display: flex; gap: 24px; margin: 18px 0;
+  padding: 12px 0;
+  border-top: 1px solid #1f2937; border-bottom: 1px solid #1f2937;
+}
+.preview-stats > div { display: flex; flex-direction: column; }
+.preview-stats strong { font-size: 16px; }
+.preview-stats span   { font-size: 12px; color: #9ca3af; }
+
+.preview-actions { display: flex; gap: 10px; margin-bottom: 18px; }
+.preview-actions .btn { flex: 1; }
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid #374151;
+  color: #d1d5db;
+}
+
+.preview-section-title {
+  font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: #9ca3af; margin-bottom: 8px;
+}
+.preview-posts { display: flex; flex-direction: column; gap: 8px; }
+.preview-post { background: #111827; padding: 10px 12px; border-radius: 10px; }
+.preview-post p { font-size: 14px; margin: 0 0 4px; line-height: 1.4; }
+.preview-post-time { font-size: 11px; color: #6b7280; }
+
+/* Make connect cards tappable */
+.connect-list [data-uid] { cursor: pointer; }

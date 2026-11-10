@@ -1432,6 +1432,65 @@ def api_me_picture_delete():
         db.session.commit()
     return jsonify({'ok': True})
 
+@app.route('/api/users/<int:uid>/preview')
+@verified_required
+def api_user_preview(uid):
+    me = current_user()
+    if uid == me.id:
+        return jsonify({'error': 'That is you'}), 400
+
+    target = User.query.get_or_404(uid)
+    if target.verification_status != 'verified' and target.role != 'admin':
+        abort(404)
+
+    db.session.add(ProfileView(viewer_id=me.id, viewed_id=uid))
+    db.session.commit()
+
+    v = StudentVerification.query.filter_by(user_id=uid).first()
+    post_count      = Post.query.filter_by(user_id=uid, anonymous=False).count()
+    follower_count  = Follow.query.filter_by(following_id=uid).count()
+    following_count = Follow.query.filter_by(follower_id=uid).count()
+
+    conn = Connection.query.filter(
+        db.or_(
+            db.and_(Connection.requester_id == me.id, Connection.recipient_id == uid),
+            db.and_(Connection.requester_id == uid, Connection.recipient_id == me.id),
+        )
+    ).first()
+
+    conn_status, conn_id = None, None
+    if conn:
+        conn_id = conn.id
+        if conn.status == 'accepted':
+            conn_status = 'connected'
+        elif conn.status == 'pending':
+            conn_status = 'outgoing' if conn.requester_id == me.id else 'incoming'
+
+    recent_posts = (Post.query
+                    .filter_by(user_id=uid, anonymous=False)
+                    .order_by(Post.created_at.desc())
+                    .limit(3).all())
+
+    return jsonify({
+        'id': target.id,
+        'name': target.full_name,
+        'avatar': user_avatar(target),
+        'bio': target.bio or '',
+        'department': v.department if v else '',
+        'faculty': v.faculty if v else '',
+        'level': v.level if v else '',
+        'post_count': post_count,
+        'follower_count': follower_count,
+        'following_count': following_count,
+        'connection_status': conn_status,
+        'connection_id': conn_id,
+        'recent_posts': [{
+            'id': p.id,
+            'content': p.content[:140] + ('…' if len(p.content) > 140 else ''),
+            'time': time_ago(p.created_at),
+        } for p in recent_posts],
+    })
+
 # ─────────────────────────────────────────────
 # CONNECT
 # ─────────────────────────────────────────────

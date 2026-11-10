@@ -227,3 +227,169 @@
   }).catch(() => {});
 
 })();
+
+/* ═══════════════════════════════════════════════════════
+   PROFILE PREVIEW MODAL
+   ═══════════════════════════════════════════════════════ */
+(function () {
+  const modal  = document.getElementById('previewModal');
+  const close  = document.getElementById('previewClose');
+  const body   = document.getElementById('previewBody');
+
+  if (!modal || !body) return;
+
+  let currentUid = null;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, m => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]
+    ));
+  }
+
+  async function openPreview(uid) {
+    currentUid = uid;
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    body.innerHTML = '<div class="empty">Loading…</div>';
+
+    try {
+      const res = await fetch(`/api/users/${uid}/preview`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error();
+      renderPreview(await res.json());
+    } catch (e) {
+      body.innerHTML = '<div class="empty">Could not load profile.</div>';
+    }
+  }
+
+  function renderPreview(p) {
+    const avatar = p.avatar
+      ? `<img class="preview-avatar" src="${esc(p.avatar)}" alt="">`
+      : `<div class="preview-avatar">${esc((p.name || '?')[0].toUpperCase())}</div>`;
+
+    const meta = [p.level ? p.level + 'L' : '', p.department, p.faculty]
+                 .filter(Boolean).join(' · ');
+
+    let actions = '';
+    switch (p.connection_status) {
+      case 'connected':
+        actions = `
+          <button class="btn btn-ghost" disabled>✓ Connected</button>
+          <button class="btn btn-primary" data-action="message">Message</button>`;
+        break;
+      case 'outgoing':
+        actions = `<button class="btn btn-ghost" disabled>Request sent</button>`;
+        break;
+      case 'incoming':
+        actions = `
+          <button class="btn btn-ghost" data-action="decline" data-cid="${p.connection_id}">Decline</button>
+          <button class="btn btn-primary" data-action="accept" data-cid="${p.connection_id}">Accept</button>`;
+        break;
+      default:
+        actions = `<button class="btn btn-primary" data-action="send" data-uid="${p.id}">Add Up</button>`;
+    }
+
+    const postsHtml = p.recent_posts.length
+      ? p.recent_posts.map(r => `
+          <div class="preview-post">
+            <p>${esc(r.content)}</p>
+            <span class="preview-post-time">${esc(r.time)} ago</span>
+          </div>`).join('')
+      : '<div class="empty" style="padding:10px 0;">No public posts yet.</div>';
+
+    body.innerHTML = `
+      <div class="preview-head">
+        ${avatar}
+        <div class="preview-info">
+          <div class="preview-name">${esc(p.name)}</div>
+          ${meta ? `<div class="preview-meta">${esc(meta)}</div>` : ''}
+          ${p.bio ? `<p class="preview-bio">${esc(p.bio)}</p>` : ''}
+        </div>
+      </div>
+
+      <div class="preview-stats">
+        <div><strong>${p.post_count}</strong><span>Posts</span></div>
+        <div><strong>${p.follower_count}</strong><span>Followers</span></div>
+        <div><strong>${p.following_count}</strong><span>Following</span></div>
+      </div>
+
+      <div class="preview-actions">${actions}</div>
+
+      <div class="preview-section-title">Recent posts</div>
+      <div class="preview-posts">${postsHtml}</div>
+    `;
+  }
+
+  function closePreview() {
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+    currentUid = null;
+  }
+
+  /* Modal action buttons */
+  body.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    btn.disabled = true;
+
+    try {
+      if (action === 'send') {
+        const r = await fetch(`/api/connect/send/${btn.dataset.uid}`,
+                              { method: 'POST', credentials: 'same-origin' });
+        if (!r.ok) throw new Error();
+        btn.textContent = 'Request sent';
+        btn.classList.replace('btn-primary', 'btn-ghost');
+        if (typeof window.loadRequests === 'function') window.loadRequests();
+
+      } else if (action === 'accept') {
+        const r = await fetch(`/api/connect/accept/${btn.dataset.cid}`,
+                              { method: 'POST', credentials: 'same-origin' });
+        if (!r.ok) throw new Error();
+        btn.textContent = '✓ Connected';
+        btn.classList.replace('btn-primary', 'btn-ghost');
+        btn.disabled = true;
+        if (typeof window.loadRequests === 'function') window.loadRequests();
+        if (typeof window.loadConnections === 'function') window.loadConnections();
+
+      } else if (action === 'decline') {
+        const r = await fetch(`/api/connect/decline/${btn.dataset.cid}`,
+                              { method: 'POST', credentials: 'same-origin' });
+        if (!r.ok) throw new Error();
+        closePreview();
+        if (typeof window.loadRequests === 'function') window.loadRequests();
+
+      } else if (action === 'message') {
+        try {
+          await fetch(`/api/chat/dm/${currentUid}`,
+                      { method: 'POST', credentials: 'same-origin' });
+        } catch (_) {}
+        window.location.href = `/chat?dm=${currentUid}`;
+      }
+    } catch (err) {
+      alert('Action failed — please try again');
+      btn.disabled = false;
+    }
+  });
+
+  /* Click a card in any connect-list → open preview */
+  document.querySelectorAll('.connect-list').forEach(list => {
+    list.addEventListener('click', (e) => {
+      // Ignore clicks on real buttons / links (let them behave normally)
+      if (e.target.closest('button, a')) return;
+      const card = e.target.closest('[data-uid]');
+      if (!card) return;
+      openPreview(card.dataset.uid);
+    });
+  });
+
+  close.addEventListener('click', closePreview);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closePreview();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal.classList.contains('open')) closePreview();
+  });
+
+  // Expose for external use
+  window.openPreview = openPreview;
+})();
