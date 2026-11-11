@@ -5,6 +5,7 @@ SQLAlchemy==2.0.31
 Flask-SocketIO==5.3.6
 python-socketio==5.11.0
 python-engineio==4.9.0
+eventlet==0.39.1
 simple-websocket==1.0.0
 gunicorn==21.2.0
 psycopg[binary]>=3.1.0

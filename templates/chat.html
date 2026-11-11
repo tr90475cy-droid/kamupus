@@ -89,14 +89,14 @@
       <div class="empty">Loading…</div>
     </div>
 
-<div class="chat-typing hidden" id="typingIndicator">
-  <span class="chat-typing-dots"><span></span><span></span><span></span></span>
-  <span id="typingText">typing…</span>
-</div>
+    <div class="chat-typing hidden" id="typingIndicator">
+      <span class="chat-typing-dots"><span></span><span></span><span></span></span>
+      <span id="typingText">typing…</span>
+    </div>
 
-<button class="chat-newpill hidden" id="newMessagesPill">
-  ↓ New messages
-</button>
+    <button class="chat-newpill hidden" id="newMessagesPill">
+      ↓ New messages
+    </button>
 
     <form class="chat-composer" id="chatComposer" onsubmit="return false;">
       <input
@@ -141,5 +141,6 @@
 
 {% endblock %}
 {% block scripts %}
+<script>window.ME_ID = {{ user.id }};</script>
 <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
 {% endblock %}

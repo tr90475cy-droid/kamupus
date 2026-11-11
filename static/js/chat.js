@@ -5,6 +5,11 @@ const socket = io({ withCredentials: true });
 
 const $ = id => document.getElementById(id);
 
+// Warn early if ME_ID is missing (would break mine-detection)
+if (typeof window.ME_ID === 'undefined') {
+  console.warn('[chat] window.ME_ID is not set — messages from you will render as received');
+}
+
 // ─── DOM ─────────────────────────────────────────────────────
 const screenRooms     = $('screenRooms');
 const screenConvo     = $('screenConvo');
@@ -40,7 +45,6 @@ let typingTimer   = null;
 let typingActive  = false;
 let peerTypingTO  = null;
 let onlineUsers   = new Set();
-let peerLastSeen  = null;
 let audioCtx      = null;
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -104,7 +108,7 @@ function renderRooms() {
     return;
   }
 
-  // Sort: rooms with unread first, then by last activity
+  // Rooms with unread bubble to top, otherwise keep server order (last activity desc)
   rooms.sort((a, b) => {
     if (a.unread > 0 && b.unread === 0) return -1;
     if (b.unread > 0 && a.unread === 0) return 1;
@@ -165,14 +169,12 @@ async function openRoom(roomId) {
   chatMessagesEl.innerHTML = '<div class="empty">Loading…</div>';
   newPillEl.classList.add('hidden');
 
-  // Join socket room — wait for connection if needed
   if (socket.connected) {
     socket.emit('join', { room_id: roomId });
   } else {
     socket.once('connect', () => socket.emit('join', { room_id: roomId }));
   }
 
-  // Load history
   try {
     const r = await fetch(`/api/chat/rooms/${roomId}/messages`,
                           { credentials: 'same-origin' });
@@ -186,10 +188,8 @@ async function openRoom(roomId) {
     return;
   }
 
-  // Mark all as read
   socket.emit('read', { room_id: roomId });
 
-  // Update room local state
   if (currentRoom) {
     currentRoom.unread = 0;
     renderRooms();
@@ -198,19 +198,23 @@ async function openRoom(roomId) {
 
 function renderMessages(msgs) {
   if (!msgs.length) {
-    chatMessagesEl.innerHTML =
-      '<div class="empty">Say hi 👋</div>';
+    chatMessagesEl.innerHTML = '<div class="empty">Say hi 👋</div>';
     return;
   }
   chatMessagesEl.innerHTML = msgs.map(m => msgHtml(m)).join('');
 }
 
+// FIX: compute `mine` from user_id when not present (socket payload has no `mine`)
 function msgHtml(m) {
-  const mine = m.mine;
+  const mine = (m.mine !== undefined)
+    ? m.mine
+    : (m.user_id === window.ME_ID);
+
   const tick = mine
     ? `<span class="msg-tick${m.read_at ? ' read' : ''}">${m.read_at ? '✓✓' : '✓'}</span>`
     : '';
   const avatar = mine ? '' : avatarHtml(m.avatar, m.author, false);
+
   return `
     <div class="msg ${mine ? 'mine' : 'theirs'}" data-id="${m.id}">
       ${avatar}
@@ -223,7 +227,6 @@ function msgHtml(m) {
 }
 
 function appendMessage(m) {
-  // Remove empty state
   const empty = chatMessagesEl.querySelector('.empty');
   if (empty) empty.remove();
 
@@ -305,16 +308,20 @@ socket.on('stop_typing', data => {
 });
 
 // ─── Incoming message ────────────────────────────────────────
+// FIX: server socket payload has no `mine` — compute it once at the top
 socket.on('message', m => {
-  // Is this the currently open room?
-  if (m.user_id !== window.ME_ID && m.room_id !== currentRoomId) {
-    // It's for a different room — just refresh the room list
+  const isMine = (m.user_id === window.ME_ID);
+  m.mine = isMine;
+
+  // Message for a room we're not viewing — just refresh list + ping
+  if (!isMine && m.room_id !== currentRoomId) {
     loadRooms();
     playPing();
     return;
   }
 
-  if (!m.mine) {
+  // Ping for any incoming message (not my own echo)
+  if (!isMine) {
     playPing();
   }
 
@@ -323,8 +330,8 @@ socket.on('message', m => {
   if (room) {
     room.last_message = m.content;
     room.last_time = m.time;
-    room.last_is_mine = m.mine;
-    if (!m.mine && m.room_id !== currentRoomId) {
+    room.last_is_mine = isMine;
+    if (!isMine && m.room_id !== currentRoomId) {
       room.unread = (room.unread || 0) + 1;
     } else if (m.room_id === currentRoomId) {
       room.unread = 0;
@@ -334,9 +341,7 @@ socket.on('message', m => {
 
   if (m.room_id === currentRoomId) {
     appendMessage(m);
-
-    // Acknowledge read for incoming
-    if (!m.mine) {
+    if (!isMine) {
       socket.emit('read', { room_id: currentRoomId });
     }
   } else {
@@ -347,7 +352,6 @@ socket.on('message', m => {
 // ─── Read receipts ───────────────────────────────────────────
 socket.on('read', data => {
   if (data.room_id !== currentRoomId) return;
-  // Mark all my ticks as read
   chatMessagesEl.querySelectorAll('.msg.mine .msg-tick').forEach(el => {
     el.classList.add('read');
     el.textContent = '✓✓';
@@ -360,13 +364,22 @@ socket.on('room_read', data => {
 });
 
 // ─── Room list live updates ──────────────────────────────────
+// FIX: don't let a stale room_update overwrite current room's unread to non-zero
 socket.on('room_update', data => {
   const room = rooms.find(r => r.id === data.room_id);
   if (!room) { loadRooms(); return; }
+
   room.last_message = data.last_message;
   room.last_time = data.last_time;
-  room.unread = data.unread;
   room.last_is_mine = false;
+
+  if (data.room_id === currentRoomId) {
+    // We're looking at this room — read receipts will clear it anyway
+    room.unread = 0;
+  } else {
+    room.unread = data.unread || 0;
+  }
+
   renderRooms();
 
   if (data.from_user_id !== window.ME_ID && data.room_id !== currentRoomId) {
@@ -382,7 +395,6 @@ socket.on('presence', data => {
     onlineUsers.delete(data.user_id);
   }
 
-  // Update header if the peer in current room changed status
   if (currentRoom && !currentRoom.is_group
       && data.user_id === currentRoom.other_user_id) {
     currentRoom.online = data.online;
@@ -392,7 +404,6 @@ socket.on('presence', data => {
     updatePresenceHeader();
     renderRooms();
   } else {
-    // Update online dot in room list
     rooms.forEach(r => {
       if (!r.is_group && r.other_user_id === data.user_id) {
         r.online = data.online;
@@ -410,8 +421,7 @@ function updatePresenceHeader() {
     return;
   }
   if (currentRoom.online) {
-    chatSubtitleEl.innerHTML =
-      '<span style="color:#22c55e;">● Online</span>';
+    chatSubtitleEl.innerHTML = '<span style="color:#22c55e;">● Online</span>';
   } else if (currentRoom.last_seen) {
     chatSubtitleEl.textContent = `Last seen ${timeAgo(currentRoom.last_seen)}`;
   } else {

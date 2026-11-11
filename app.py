@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 import os
 
 try:
@@ -70,9 +73,9 @@ else:
 socketio = SocketIO(
     app,
     cors_allowed_origins='*',
-    async_mode='threading',
-    ping_interval=10,
-    ping_timeout=20,
+    async_mode='eventlet',
+    ping_interval=25,
+    ping_timeout=60,
     max_http_buffer_size=1_000_000,
 )
 
@@ -169,11 +172,7 @@ def verified_required(f):
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
 def save_upload(file, prefix):
-    """Upload to Supabase Storage via direct HTTPS API (avoids supabase-py bugs).
-
-    Returns the public URL on success, None on failure.
-    The actual error is stored in _last_upload_error for the caller.
-    """
+    """Upload to Supabase Storage via direct HTTPS API (avoids supabase-py bugs)."""
     global _last_upload_error
     _last_upload_error = None
 
@@ -229,10 +228,7 @@ def save_upload(file, prefix):
 
 
 def delete_upload(path):
-    """Delete a file from Supabase Storage via direct HTTPS API.
-
-    Silently no-ops on legacy local paths (paths not starting with http).
-    """
+    """Delete a file from Supabase Storage via direct HTTPS API."""
     if not path or not SUPABASE_URL or not SUPABASE_KEY:
         return
     if not isinstance(path, str) or not path.startswith('http'):
@@ -306,14 +302,12 @@ def is_admin_unlocked():
     return True
 
 # ─────────────────────────────────────────────
-# ROOT — FIXED: subdomain-aware routing
+# ROOT
 # ─────────────────────────────────────────────
 @app.route('/')
 def index():
     u = current_user()
     host = (request.host or '').split(':')[0].lower()
-
-    # app.kamupus.com → always show app (never marketing)
     is_app_host = host.startswith('app.')
 
     if is_app_host:
@@ -325,7 +319,6 @@ def index():
             return redirect(url_for('home'))
         return redirect(url_for('pending'))
 
-    # kamupus.com (root) → landing for logged-out, app for logged-in
     if not u:
         return render_template('landing.html')
     if u.role == 'admin':
@@ -388,7 +381,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ─────────────────────────────────────────────
-# VERIFICATION — FIXED: user_id uniqueness + AI-check safety
+# VERIFICATION
 # ─────────────────────────────────────────────
 @app.route('/verify', methods=['GET', 'POST'])
 @login_required
@@ -423,7 +416,6 @@ def verify():
             flash('Only PNG, JPG, JPEG, WEBP, or PDF allowed', 'error')
             return render_template('verify.html', form=request.form)
 
-        # FIX #1: check by BOTH matric_no and user_id
         existing_by_matric = StudentVerification.query.filter_by(matric_no=matric).first()
         existing_by_user   = StudentVerification.query.filter_by(user_id=u.id).first()
 
@@ -435,7 +427,6 @@ def verify():
         local_name = secure_filename(f"verify_{u.id}_{int(datetime.utcnow().timestamp())}_{file.filename}")
         local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_name)
 
-        # FIX #2: wrap analyze_image in try/except so PDFs can't crash the route
         try:
             with open(local_path, 'wb') as fh:
                 fh.write(file_bytes)
@@ -471,7 +462,6 @@ def verify():
             flash(f'Upload failed — {_last_upload_error or "please try again"}', 'error')
             return render_template('verify.html', form=request.form)
 
-        # Delete any prior record for THIS user (regardless of matric_no)
         if existing_by_user:
             delete_upload(existing_by_user.admission_letter_path)
             db.session.delete(existing_by_user)
@@ -608,7 +598,6 @@ def api_create_post():
     db.session.commit()
     return jsonify(serialize_post(p, current_user().id))
 
-# FIX #4: removed redundant Like/Comment deletes (cascade handles it)
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 @verified_required
 def api_delete_post(pid):
@@ -1163,6 +1152,10 @@ def serialize_room_for(r, me):
               .filter(ChatMessage.user_id != me.id)
               .count())
 
+    unread_label = ''
+    if unread > 0:
+        unread_label = f'{unread} new message' + ('s' if unread != 1 else '')
+
     return {
         'id': r.id, 'name': display_name, 'avatar': avatar,
         'is_group': r.is_group, 'other_user_id': other_user_id,
@@ -1171,6 +1164,7 @@ def serialize_room_for(r, me):
         'last_is_mine': (last_msg.user_id == me.id) if last_msg else False,
         'member_count': len(r.members),
         'unread': unread,
+        'unread_label': unread_label,
         'online': other_online,
         'last_seen': other_last_seen,
     }
@@ -1214,7 +1208,6 @@ def api_chat_total_unread():
              .count())
     return jsonify({'count': count})
 
-# FIX #3: sort by actual timestamp, not by string like "5m"/"2h"
 @app.route('/api/chat/rooms/<int:rid>/messages')
 @verified_required
 def api_chat_messages(rid):
@@ -1330,7 +1323,6 @@ def api_search():
 
     q_lower = q.lower()
 
-    # People
     people = []
     for u in User.query.filter(
         User.id != me.id,
@@ -1348,7 +1340,6 @@ def api_search():
             })
             if len(people) >= 10: break
 
-    # Groups (rooms you're a member of)
     groups = []
     my_room_ids = [m.room_id for m in ChatMember.query.filter_by(user_id=me.id).all()]
     if my_room_ids:
@@ -1360,7 +1351,6 @@ def api_search():
                 groups.append({'id': r.id, 'name': r.name, 'member_count': len(r.members)})
                 if len(groups) >= 5: break
 
-    # Posts
     posts = []
     for p in Post.query.filter(Post.content.ilike(f'%{q}%'))\
                       .order_by(Post.created_at.desc()).limit(10).all():
@@ -1372,7 +1362,6 @@ def api_search():
             'anonymous': p.anonymous,
         })
 
-    # Events
     events = []
     for e in Event.query.filter(Event.title.ilike(f'%{q}%')).limit(5).all():
         events.append({
@@ -1380,7 +1369,6 @@ def api_search():
             'starts_label': e.starts_at.strftime('%a, %b %d · %I:%M %p'),
         })
 
-    # Listings
     listings = []
     for l in Listing.query.filter(
         db.or_(Listing.title.ilike(f'%{q}%'), Listing.description.ilike(f'%{q}%'))
@@ -1865,20 +1853,6 @@ def admin_log_view():
 # ─────────────────────────────────────────────
 # WEBSOCKET
 # ─────────────────────────────────────────────
-@socketio.on('join')
-def ws_join(data):
-    rid = data.get('room_id')
-    if not rid: return
-    u = current_user()
-    if not u: return
-    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
-    join_room(f'room_{rid}')
-
-@socketio.on('leave')
-def ws_leave(data):
-    rid = data.get('room_id')
-    if rid: leave_room(f'room_{rid}')
-
 @socketio.on('connect')
 def ws_connect():
     u = current_user()
@@ -1894,12 +1868,12 @@ def ws_connect():
     join_room(f'user_{u.id}')
     print(f'[WS] connect: user={u.id} ({"re" if was_online else "new"})')
 
-    # Tell every room we're in that we're online
     if not was_online:
         for m in ChatMember.query.filter_by(user_id=u.id).all():
             emit('presence',
                  {'user_id': u.id, 'online': True},
                  to=f'room_{m.room_id}')
+
 
 @socketio.on('disconnect')
 def ws_disconnect():
@@ -1927,6 +1901,23 @@ def ws_disconnect():
                   'last_seen': u.last_seen.isoformat()},
                  to=f'room_{m.room_id}')
 
+
+@socketio.on('join')
+def ws_join(data):
+    rid = data.get('room_id')
+    if not rid: return
+    u = current_user()
+    if not u: return
+    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
+    join_room(f'room_{rid}')
+
+
+@socketio.on('leave')
+def ws_leave(data):
+    rid = data.get('room_id')
+    if rid: leave_room(f'room_{rid}')
+
+
 @socketio.on('message')
 def ws_message(data):
     rid = data.get('room_id')
@@ -1953,7 +1944,7 @@ def ws_message(data):
     }
     emit('message', payload, to=f'room_{rid}')
 
-    # Push room-list updates to every other member (personal rooms)
+    # Push room-list updates + unread indicators to every other member
     room = ChatRoom.query.get(rid)
     if room:
         for m in room.members:
@@ -1963,15 +1954,20 @@ def ws_message(data):
                       .filter_by(room_id=rid, read_at=None)
                       .filter(ChatMessage.user_id != m.user_id)
                       .count())
+            unread_label = (f'{unread} new message' + ('s' if unread != 1 else '')) if unread > 0 else ''
             emit('room_update',
                  {
                      'room_id': rid,
                      'last_message': msg.content[:80],
                      'last_time': time_ago(msg.created_at),
                      'unread': unread,
+                     'unread_label': unread_label,
                      'from_user_id': u.id,
+                     'from_name': u.full_name,
+                     'from_avatar': user_avatar(u),
                  },
                  to=f'user_{m.user_id}')
+
 
 @socketio.on('typing')
 def ws_typing(data):
@@ -2017,18 +2013,16 @@ def ws_read(data):
         emit('read',
              {'room_id': rid, 'user_id': u.id},
              to=f'room_{rid}', include_self=False)
-        # Also clear the room's unread badge on my own room list
         emit('room_read',
              {'room_id': rid},
              to=f'user_{u.id}')
 
 # ─────────────────────────────────────────────
-# DEBUG — FIXED: locked down
+# DEBUG
 # ─────────────────────────────────────────────
 @app.route('/api/debug/users')
 @verified_required
 def api_debug_users():
-    # FIX #5: admin-only, not every verified user
     u = current_user()
     if not u or u.role != 'admin':
         abort(404)
@@ -2075,6 +2069,7 @@ def debug_supabase():
 with app.app_context():
     db.create_all()
 
+    # Auto-migrate missing columns (works on SQLite + Postgres)
     from sqlalchemy import inspect, text
     insp = inspect(db.engine)
     tables = set(insp.get_table_names())
@@ -2106,10 +2101,6 @@ with app.app_context():
                         print(f'⚠ auto-migrate {table}.{col}: {e}')
 
     # Verify Supabase bucket exists at startup
-    ...
-
-    # Verify Supabase bucket exists at startup
-        # Verify Supabase bucket exists at startup (uses requests, not supabase-py)
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             base = SUPABASE_URL.rstrip('/')
