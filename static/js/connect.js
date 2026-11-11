@@ -98,39 +98,39 @@
   // CARD
   // ═══════════════════════════════════════
   function cardHtml(u, mode) {
-    const avatarHtml = u.avatar
-      ? `<img class="connect-avatar" src="${esc(u.avatar)}" alt="">`
-      : `<div class="connect-avatar connect-avatar-blank"></div>`;
+  const avatarHtml = u.avatar
+    ? `<img class="connect-avatar" src="${esc(u.avatar)}" alt="">`
+    : `<div class="connect-avatar connect-avatar-blank"></div>`;
 
-    const meta = [u.level ? u.level + 'L' : '', u.department].filter(Boolean).join(' · ');
+  const meta = [u.level ? u.level + 'L' : '', u.department].filter(Boolean).join(' · ');
 
-    let action = '';
-    if (mode === 'discover') {
-      action = `<button class="btn btn-primary btn-sm" data-action="connect" data-uid="${u.id}">Add Up</button>`;
-    } else if (mode === 'incoming') {
-      action = `
-        <div class="connect-actions">
-          <button class="btn btn-success btn-sm" data-action="accept" data-cid="${u.connection_id}">Accept</button>
-          <button class="btn btn-ghost btn-sm" data-action="decline" data-cid="${u.connection_id}">Decline</button>
-        </div>`;
-    } else if (mode === 'outgoing') {
-      action = `<span class="tag tag-pending">Requested</span>`;
-    } else if (mode === 'connected') {
-      action = `<button class="btn btn-ghost btn-sm" data-action="message" data-uid="${u.id}">Message</button>`;
-    }
-
-    return `
-      <div class="connect-card">
-        ${avatarHtml}
-        <div class="connect-body">
-          <div class="connect-name">${esc(u.name)}</div>
-          ${meta ? `<div class="connect-meta">${esc(meta)}</div>` : ''}
-          ${u.bio ? `<div class="connect-bio">${esc(u.bio)}</div>` : ''}
-        </div>
-        <div class="connect-action">${action}</div>
-      </div>
-    `;
+  let action = '';
+  if (mode === 'discover') {
+    action = `<button class="btn btn-primary btn-sm" data-action="connect" data-uid="${u.id}">Add Up</button>`;
+  } else if (mode === 'incoming') {
+    action = `
+      <div class="connect-actions">
+        <button class="btn btn-success btn-sm" data-action="accept" data-cid="${u.connection_id}">Accept</button>
+        <button class="btn btn-ghost btn-sm" data-action="decline" data-cid="${u.connection_id}">Decline</button>
+      </div>`;
+  } else if (mode === 'outgoing') {
+    action = `<span class="tag tag-pending">Requested</span>`;
+  } else if (mode === 'connected') {
+    action = `<button class="btn btn-ghost btn-sm" data-action="message" data-uid="${u.id}">Message</button>`;
   }
+
+  return `
+    <div class="connect-card" data-uid="${u.id}">       <!-- ← FIX -->
+      ${avatarHtml}
+      <div class="connect-body">
+        <div class="connect-name">${esc(u.name)}</div>
+        ${meta ? `<div class="connect-meta">${esc(meta)}</div>` : ''}
+        ${u.bio ? `<div class="connect-bio">${esc(u.bio)}</div>` : ''}
+      </div>
+      <div class="connect-action">${action}</div>
+    </div>
+  `;
+}
 
   // ═══════════════════════════════════════
   // ACTION HANDLER

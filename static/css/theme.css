@@ -1178,3 +1178,15 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 
 /* Make connect cards tappable */
 .connect-list [data-uid] { cursor: pointer; }
+
+.connect-card {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.connect-card:hover {
+  background: #f8fafc;
+}
+.connect-card button,
+.connect-card a {
+  cursor: pointer;    /* buttons keep their own pointer */
+}
