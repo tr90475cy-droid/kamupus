@@ -20,6 +20,7 @@ class User(db.Model):
     subaccount_code = db.Column(db.String(50), index=True)
     paystack_recipient_code = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime, nullable=True)
 
     verification = db.relationship('StudentVerification', backref='user', uselist=False,
                                    foreign_keys='StudentVerification.user_id',
@@ -117,6 +118,7 @@ class ChatMessage(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    read_at = db.Column(db.DateTime, nullable=True, index=True)
 
     user = db.relationship('User')
 

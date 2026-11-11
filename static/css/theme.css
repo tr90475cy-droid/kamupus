@@ -1190,3 +1190,58 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 .connect-card a {
   cursor: pointer;    /* buttons keep their own pointer */
 }
+
+/* ── Typing indicator ────────────────────────────── */
+.chat-typing {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 16px 8px; font-size: 12px; color: #9ca3af;
+}
+.chat-typing.hidden { display: none; }
+.chat-typing-dots { display: inline-flex; gap: 3px; }
+.chat-typing-dots span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #6b7280;
+  animation: typingBounce 1.2s infinite ease-in-out;
+}
+.chat-typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.chat-typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typingBounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* ── New-messages pill ───────────────────────────── */
+.chat-newpill {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 78px; z-index: 10;
+  background: #3b82f6; color: #fff;
+  border: none; border-radius: 20px;
+  padding: 6px 16px; font-size: 12px; font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(59,130,246,0.4);
+}
+.chat-newpill.hidden { display: none; }
+
+/* ── Message ticks ───────────────────────────────── */
+.msg-tick { margin-left: 4px; font-size: 11px; opacity: 0.7; }
+.msg-tick.read { color: #60a5fa; opacity: 1; }
+
+/* ── Unread badge on room list ───────────────────── */
+.room-unread {
+  background: #3b82f6; color: #fff;
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 10px; font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-left: auto;
+}
+
+/* ── Online dot ──────────────────────────────────── */
+.online-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #22c55e; border: 2px solid #0b1220;
+  position: absolute; bottom: 0; right: 0;
+}
+.chat-peer-avatar { position: relative; }
+
+/* ── Sending state ───────────────────────────────── */
+.msg.sending { opacity: 0.6; }

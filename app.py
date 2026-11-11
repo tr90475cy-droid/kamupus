@@ -9,6 +9,9 @@ except ImportError:
 import json
 import uuid
 import requests
+import threading
+_online_lock = threading.Lock()
+_online_users = {}          # user_id -> set of sid
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -1144,21 +1147,34 @@ def serialize_room_for(r, me):
     last_msg = r.messages[-1] if r.messages else None
     if r.is_group:
         display_name, avatar, other_user_id = r.name, None, None
+        other_online = False
+        other_last_seen = None
     else:
         other = next((m.user for m in r.members if m.user_id != me.id), None)
         display_name = other.full_name if other else 'Unknown'
         avatar = user_avatar(other) if other else None
         other_user_id = other.id if other else None
+        other_online = bool(other and other.id in _online_users)
+        other_last_seen = (other.last_seen.isoformat()
+                           if other and other.last_seen else None)
+
+    unread = (ChatMessage.query
+              .filter_by(room_id=r.id, read_at=None)
+              .filter(ChatMessage.user_id != me.id)
+              .count())
 
     return {
         'id': r.id, 'name': display_name, 'avatar': avatar,
         'is_group': r.is_group, 'other_user_id': other_user_id,
         'last_message': last_msg.content if last_msg else '',
         'last_time': time_ago(last_msg.created_at) if last_msg else '',
+        'last_is_mine': (last_msg.user_id == me.id) if last_msg else False,
         'member_count': len(r.members),
+        'unread': unread,
+        'online': other_online,
+        'last_seen': other_last_seen,
     }
 
-# FIX #3: sort by actual timestamp, not by string like "5m"/"2h"
 @app.route('/api/chat/rooms', methods=['GET'])
 @verified_required
 def api_chat_rooms_list():
@@ -1169,6 +1185,51 @@ def api_chat_rooms_list():
         reverse=True
     )
     return jsonify([serialize_room_for(r, me) for r in rooms])
+
+@app.route('/api/chat/rooms/<int:rid>/unread-count')
+@verified_required
+def api_chat_unread(rid):
+    me = current_user()
+    if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
+        abort(403)
+    count = (ChatMessage.query
+             .filter(ChatMessage.room_id == rid,
+                     ChatMessage.user_id != me.id,
+                     ChatMessage.read_at.is_(None))
+             .count())
+    return jsonify({'count': count})
+
+
+@app.route('/api/chat/total-unread')
+@verified_required
+def api_chat_total_unread():
+    me = current_user()
+    room_ids = [m.room_id for m in ChatMember.query.filter_by(user_id=me.id).all()]
+    if not room_ids:
+        return jsonify({'count': 0})
+    count = (ChatMessage.query
+             .filter(ChatMessage.room_id.in_(room_ids),
+                     ChatMessage.user_id != me.id,
+                     ChatMessage.read_at.is_(None))
+             .count())
+    return jsonify({'count': count})
+
+# FIX #3: sort by actual timestamp, not by string like "5m"/"2h"
+@app.route('/api/chat/rooms/<int:rid>/messages')
+@verified_required
+def api_chat_messages(rid):
+    me = current_user().id
+    if not ChatMember.query.filter_by(room_id=rid, user_id=me).first():
+        abort(403)
+    room = ChatRoom.query.get_or_404(rid)
+    return jsonify([{
+        'id': m.id, 'content': m.content, 'user_id': m.user_id,
+        'author': m.user.full_name, 'avatar': user_avatar(m.user),
+        'mine': m.user_id == me,
+        'time': m.created_at.strftime('%I:%M %p'),
+        'created_at': m.created_at.isoformat(),
+        'read_at': m.read_at.isoformat() if m.read_at else None,
+    } for m in room.messages])
 
 @app.route('/api/chat/group', methods=['POST'])
 @verified_required
@@ -1220,19 +1281,6 @@ def api_chat_dm_open(user_id):
     return jsonify({'id': room.id, 'name': target.full_name,
                     'avatar': user_avatar(target), 'is_group': False,
                     'other_user_id': target.id})
-
-@app.route('/api/chat/rooms/<int:rid>/messages')
-@verified_required
-def api_chat_messages(rid):
-    me = current_user().id
-    membership = ChatMember.query.filter_by(room_id=rid, user_id=me).first()
-    if not membership: abort(403)
-    room = ChatRoom.query.get_or_404(rid)
-    return jsonify([{
-        'id': m.id, 'content': m.content, 'user_id': m.user_id,
-        'author': m.user.full_name, 'avatar': user_avatar(m.user),
-        'mine': m.user_id == me, 'time': m.created_at.strftime('%I:%M %p'),
-    } for m in room.messages])
 
 # ─────────────────────────────────────────────
 # USER SEARCH
@@ -1831,24 +1879,148 @@ def ws_leave(data):
     rid = data.get('room_id')
     if rid: leave_room(f'room_{rid}')
 
+@socketio.on('connect')
+def ws_connect():
+    u = current_user()
+    if not u:
+        print('[WS] connect: anonymous')
+        return
+
+    sid = request.sid
+    with _online_lock:
+        was_online = bool(_online_users.get(u.id))
+        _online_users.setdefault(u.id, set()).add(sid)
+
+    join_room(f'user_{u.id}')
+    print(f'[WS] connect: user={u.id} ({"re" if was_online else "new"})')
+
+    # Tell every room we're in that we're online
+    if not was_online:
+        for m in ChatMember.query.filter_by(user_id=u.id).all():
+            emit('presence',
+                 {'user_id': u.id, 'online': True},
+                 to=f'room_{m.room_id}')
+
+@socketio.on('disconnect')
+def ws_disconnect():
+    u = current_user()
+    if not u:
+        return
+
+    sid = request.sid
+    now_offline = False
+    with _online_lock:
+        sids = _online_users.get(u.id)
+        if sids:
+            sids.discard(sid)
+            if not sids:
+                _online_users.pop(u.id, None)
+                now_offline = True
+
+    if now_offline:
+        u.last_seen = datetime.utcnow()
+        db.session.commit()
+        print(f'[WS] disconnect: user={u.id} (offline)')
+        for m in ChatMember.query.filter_by(user_id=u.id).all():
+            emit('presence',
+                 {'user_id': u.id, 'online': False,
+                  'last_seen': u.last_seen.isoformat()},
+                 to=f'room_{m.room_id}')
+
 @socketio.on('message')
 def ws_message(data):
     rid = data.get('room_id')
     content = (data.get('content') or '').strip()
     u = current_user()
-    if not rid or not content or not u: return
-    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
+    if not rid or not content or not u:
+        return
+    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first():
+        return
 
     msg = ChatMessage(room_id=rid, user_id=u.id, content=content[:2000])
     db.session.add(msg)
     db.session.commit()
 
     payload = {
-        'id': msg.id, 'content': msg.content, 'user_id': u.id,
-        'author': u.full_name, 'avatar': user_avatar(u),
+        'id': msg.id,
+        'content': msg.content,
+        'user_id': u.id,
+        'author': u.full_name,
+        'avatar': user_avatar(u),
         'time': msg.created_at.strftime('%I:%M %p'),
+        'created_at': msg.created_at.isoformat(),
+        'read_at': None,
     }
     emit('message', payload, to=f'room_{rid}')
+
+    # Push room-list updates to every other member (personal rooms)
+    room = ChatRoom.query.get(rid)
+    if room:
+        for m in room.members:
+            if m.user_id == u.id:
+                continue
+            unread = (ChatMessage.query
+                      .filter_by(room_id=rid, read_at=None)
+                      .filter(ChatMessage.user_id != m.user_id)
+                      .count())
+            emit('room_update',
+                 {
+                     'room_id': rid,
+                     'last_message': msg.content[:80],
+                     'last_time': time_ago(msg.created_at),
+                     'unread': unread,
+                     'from_user_id': u.id,
+                 },
+                 to=f'user_{m.user_id}')
+
+@socketio.on('typing')
+def ws_typing(data):
+    rid = data.get('room_id')
+    u = current_user()
+    if not rid or not u:
+        return
+    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first():
+        return
+    emit('typing',
+         {'room_id': rid, 'user_id': u.id, 'name': u.full_name},
+         to=f'room_{rid}', include_self=False)
+
+
+@socketio.on('stop_typing')
+def ws_stop_typing(data):
+    rid = data.get('room_id')
+    u = current_user()
+    if not rid or not u:
+        return
+    emit('stop_typing',
+         {'room_id': rid, 'user_id': u.id},
+         to=f'room_{rid}', include_self=False)
+
+
+@socketio.on('read')
+def ws_read(data):
+    rid = data.get('room_id')
+    u = current_user()
+    if not rid or not u:
+        return
+    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first():
+        return
+
+    updated = (ChatMessage.query
+               .filter(ChatMessage.room_id == rid,
+                       ChatMessage.user_id != u.id,
+                       ChatMessage.read_at.is_(None))
+               .update({'read_at': datetime.utcnow()}, synchronize_session=False))
+    db.session.commit()
+
+    if updated:
+        emit('read',
+             {'room_id': rid, 'user_id': u.id},
+             to=f'room_{rid}', include_self=False)
+        # Also clear the room's unread badge on my own room list
+        emit('room_read',
+             {'room_id': rid},
+             to=f'user_{u.id}')
 
 # ─────────────────────────────────────────────
 # DEBUG — FIXED: locked down
@@ -1903,30 +2075,38 @@ def debug_supabase():
 with app.app_context():
     db.create_all()
 
-    # Auto-migrate missing SQLite columns
-    if app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:///'):
-        from sqlalchemy import inspect, text
-        insp = inspect(db.engine)
-        tables = set(insp.get_table_names())
-        wanted = {
-            'users': {
-                'whatsapp_number':         'VARCHAR(20)',
-                'bio':                     'VARCHAR(200)',
-                'subaccount_code':         'VARCHAR(50)',
-                'paystack_recipient_code': 'VARCHAR(50)',
-            },
-        }
-        with db.engine.begin() as conn:
-            for table, cols in wanted.items():
-                if table not in tables:
-                    continue
-                have = {c['name'] for c in insp.get_columns(table)}
-                for col, typ in cols.items():
-                    if col not in have:
+    from sqlalchemy import inspect, text
+    insp = inspect(db.engine)
+    tables = set(insp.get_table_names())
+    wanted = {
+        'users': {
+            'whatsapp_number':         'VARCHAR(20)',
+            'bio':                     'VARCHAR(200)',
+            'subaccount_code':         'VARCHAR(50)',
+            'paystack_recipient_code': 'VARCHAR(50)',
+            'last_seen':               'TIMESTAMP',
+        },
+        'chat_messages': {
+            'read_at':                 'TIMESTAMP',
+        },
+    }
+    with db.engine.begin() as conn:
+        for table, cols in wanted.items():
+            if table not in tables:
+                continue
+            have = {c['name'] for c in insp.get_columns(table)}
+            for col, typ in cols.items():
+                if col not in have:
+                    try:
                         conn.execute(text(
                             f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ}'
                         ))
                         print(f'✓ auto-migrate: {table}.{col}')
+                    except Exception as e:
+                        print(f'⚠ auto-migrate {table}.{col}: {e}')
+
+    # Verify Supabase bucket exists at startup
+    ...
 
     # Verify Supabase bucket exists at startup
         # Verify Supabase bucket exists at startup (uses requests, not supabase-py)

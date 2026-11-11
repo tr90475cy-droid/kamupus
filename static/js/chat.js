@@ -1,429 +1,564 @@
 (() => {
-  'use strict';
+'use strict';
 
-  const socket = io();
+const socket = io({ withCredentials: true });
 
-  // Screens
-  const screenRooms = document.getElementById('screenRooms');
-  const screenConvo = document.getElementById('screenConvo');
+const $ = id => document.getElementById(id);
 
-  // Rooms screen
-  const roomListEl      = document.getElementById('roomList');
-  const searchToggleBtn = document.getElementById('searchToggleBtn');
-  const searchBar       = document.getElementById('searchBar');
-  const searchInput     = document.getElementById('searchInput');
-  const searchCloseBtn  = document.getElementById('searchCloseBtn');
-  const searchResults   = document.getElementById('searchResults');
-  const startNewBtn     = document.getElementById('startNewBtn');
+// ─── DOM ─────────────────────────────────────────────────────
+const screenRooms     = $('screenRooms');
+const screenConvo     = $('screenConvo');
+const roomListEl      = $('roomList');
+const chatMessagesEl  = $('chatMessages');
+const chatInputEl     = $('chatInput');
+const chatSendBtn     = $('chatSend');
+const chatTitleEl     = $('chatTitle');
+const chatSubtitleEl  = $('chatSubtitle');
+const chatPeerAvatar  = $('chatPeerAvatar');
+const convoBackBtn    = $('convoBackBtn');
+const typingEl        = $('typingIndicator');
+const typingTextEl    = $('typingText');
+const newPillEl       = $('newMessagesPill');
+const searchToggleBtn = $('searchToggleBtn');
+const searchBar       = $('searchBar');
+const searchInput     = $('searchInput');
+const searchCloseBtn  = $('searchCloseBtn');
+const searchResults   = $('searchResults');
+const newGroupBtn     = $('newGroupBtn');
+const newGroupModal   = $('newGroupModal');
+const newGroupClose   = $('newGroupClose');
+const newGroupCreate  = $('newGroupCreate');
+const newGroupName    = $('newGroupName');
+const groupUserPicker = $('groupUserPicker');
+const startNewBtn     = $('startNewBtn');
 
-  // Conversation screen
-  const convoBackBtn    = document.getElementById('convoBackBtn');
-  const messagesEl      = document.getElementById('chatMessages');
-  const inputEl         = document.getElementById('chatInput');
-  const sendEl          = document.getElementById('chatSend');
-  const titleEl         = document.getElementById('chatTitle');
-  const subtitleEl      = document.getElementById('chatSubtitle');
-  const peerAvatar      = document.getElementById('chatPeerAvatar');
+// ─── State ───────────────────────────────────────────────────
+let rooms         = [];
+let currentRoomId = null;
+let currentRoom   = null;
+let typingTimer   = null;
+let typingActive  = false;
+let peerTypingTO  = null;
+let onlineUsers   = new Set();
+let peerLastSeen  = null;
+let audioCtx      = null;
 
-  // Group modal
-  const newGroupBtn     = document.getElementById('newGroupBtn');
-  const newGroupModal   = document.getElementById('newGroupModal');
-  const newGroupClose   = document.getElementById('newGroupClose');
-  const newGroupCreate  = document.getElementById('newGroupCreate');
-  const newGroupName    = document.getElementById('newGroupName');
-  const groupUserPicker = document.getElementById('groupUserPicker');
+// ─── Helpers ─────────────────────────────────────────────────
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, m => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]
+  ));
+}
+function initials(name) {
+  return (name || '?').trim().split(/\s+/).map(w => w[0])
+    .slice(0, 2).join('').toUpperCase();
+}
+function avatarHtml(url, name, small) {
+  const cls = small ? 'room-avatar' : 'msg-avatar';
+  return url
+    ? `<img class="${cls}" src="${esc(url)}" alt="">`
+    : `<div class="${cls} avatar-blank">${esc(initials(name))}</div>`;
+}
+function isAtBottom() {
+  if (!chatMessagesEl) return true;
+  const gap = chatMessagesEl.scrollHeight - chatMessagesEl.scrollTop
+              - chatMessagesEl.clientHeight;
+  return gap < 60;
+}
+function scrollToBottom(instant) {
+  if (!chatMessagesEl) return;
+  chatMessagesEl.scrollTo({
+    top: chatMessagesEl.scrollHeight,
+    behavior: instant ? 'auto' : 'smooth',
+  });
+}
+function playPing() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.08, audioCtx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.26);
+  } catch (_) {}
+}
 
-  let currentRoom = null;
-  let selectedUsers = new Set();
+// ─── Room list ───────────────────────────────────────────────
+async function loadRooms() {
+  try {
+    const r = await fetch('/api/chat/rooms', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error();
+    rooms = await r.json();
+    renderRooms();
+  } catch (_) {
+    roomListEl.innerHTML = '<div class="empty">Could not load chats.</div>';
+  }
+}
 
-  // ─────────────────────────────────────────
-  // SCREEN SWITCHING
-  // ─────────────────────────────────────────
-  function showRooms() {
-    screenConvo.classList.add('hidden');
-    screenRooms.classList.remove('hidden');
-    if (currentRoom) {
-      socket.emit('leave', { room_id: currentRoom });
-      currentRoom = null;
+function renderRooms() {
+  if (!rooms.length) {
+    roomListEl.innerHTML = '<div class="empty">No chats yet. Tap + to start one.</div>';
+    return;
+  }
+
+  // Sort: rooms with unread first, then by last activity
+  rooms.sort((a, b) => {
+    if (a.unread > 0 && b.unread === 0) return -1;
+    if (b.unread > 0 && a.unread === 0) return 1;
+    return 0;
+  });
+
+  roomListEl.innerHTML = rooms.map(r => {
+    const avatar = r.avatar
+      ? `<img class="room-avatar" src="${esc(r.avatar)}" alt="">`
+      : `<div class="room-avatar avatar-blank">${esc(initials(r.name))}</div>`;
+
+    const onlineDot = (!r.is_group && r.online)
+      ? '<span class="online-dot"></span>' : '';
+
+    const lastLine = r.last_message
+      ? `${r.last_is_mine ? 'You: ' : ''}${esc(r.last_message)}`
+      : '<em style="opacity:.5;">No messages yet</em>';
+
+    const unreadBadge = r.unread > 0
+      ? `<span class="room-unread">${r.unread > 99 ? '99+' : r.unread}</span>`
+      : '';
+
+    return `
+      <div class="room-item${r.unread > 0 ? ' unread' : ''}" data-id="${r.id}">
+        <div style="position:relative;">${avatar}${onlineDot}</div>
+        <div class="room-body">
+          <div class="room-head">
+            <div class="room-name">${esc(r.name)}</div>
+            <div class="room-time">${esc(r.last_time)}</div>
+          </div>
+          <div class="room-preview">${lastLine}</div>
+        </div>
+        ${unreadBadge}
+      </div>`;
+  }).join('');
+}
+
+roomListEl.addEventListener('click', e => {
+  const item = e.target.closest('.room-item');
+  if (item) openRoom(parseInt(item.dataset.id, 10));
+});
+
+// ─── Open conversation ───────────────────────────────────────
+async function openRoom(roomId) {
+  currentRoomId = roomId;
+  currentRoom = rooms.find(r => r.id === roomId);
+  screenRooms.classList.add('hidden');
+  screenConvo.classList.remove('hidden');
+
+  if (currentRoom) {
+    chatTitleEl.textContent = currentRoom.name;
+    chatPeerAvatar.innerHTML = currentRoom.avatar
+      ? `<img src="${esc(currentRoom.avatar)}" alt="">`
+      : `<div class="avatar-blank">${esc(initials(currentRoom.name))}</div>`;
+    updatePresenceHeader();
+  }
+
+  chatMessagesEl.innerHTML = '<div class="empty">Loading…</div>';
+  newPillEl.classList.add('hidden');
+
+  // Join socket room — wait for connection if needed
+  if (socket.connected) {
+    socket.emit('join', { room_id: roomId });
+  } else {
+    socket.once('connect', () => socket.emit('join', { room_id: roomId }));
+  }
+
+  // Load history
+  try {
+    const r = await fetch(`/api/chat/rooms/${roomId}/messages`,
+                          { credentials: 'same-origin' });
+    if (!r.ok) throw new Error();
+    const msgs = await r.json();
+    renderMessages(msgs);
+    scrollToBottom(true);
+    chatInputEl.focus();
+  } catch (_) {
+    chatMessagesEl.innerHTML = '<div class="empty">Could not load messages.</div>';
+    return;
+  }
+
+  // Mark all as read
+  socket.emit('read', { room_id: roomId });
+
+  // Update room local state
+  if (currentRoom) {
+    currentRoom.unread = 0;
+    renderRooms();
+  }
+}
+
+function renderMessages(msgs) {
+  if (!msgs.length) {
+    chatMessagesEl.innerHTML =
+      '<div class="empty">Say hi 👋</div>';
+    return;
+  }
+  chatMessagesEl.innerHTML = msgs.map(m => msgHtml(m)).join('');
+}
+
+function msgHtml(m) {
+  const mine = m.mine;
+  const tick = mine
+    ? `<span class="msg-tick${m.read_at ? ' read' : ''}">${m.read_at ? '✓✓' : '✓'}</span>`
+    : '';
+  const avatar = mine ? '' : avatarHtml(m.avatar, m.author, false);
+  return `
+    <div class="msg ${mine ? 'mine' : 'theirs'}" data-id="${m.id}">
+      ${avatar}
+      <div class="msg-bubble">
+        ${mine ? '' : `<div class="msg-author">${esc(m.author)}</div>`}
+        <div class="msg-content">${esc(m.content)}</div>
+        <div class="msg-meta">${esc(m.time)}${tick}</div>
+      </div>
+    </div>`;
+}
+
+function appendMessage(m) {
+  // Remove empty state
+  const empty = chatMessagesEl.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const atBottom = isAtBottom();
+  chatMessagesEl.insertAdjacentHTML('beforeend', msgHtml(m));
+
+  if (m.mine || atBottom) {
+    scrollToBottom();
+    newPillEl.classList.add('hidden');
+  } else {
+    newPillEl.classList.remove('hidden');
+  }
+}
+
+newPillEl.addEventListener('click', () => {
+  scrollToBottom();
+  newPillEl.classList.add('hidden');
+});
+
+// ─── Send message ────────────────────────────────────────────
+function sendMessage() {
+  const content = chatInputEl.value.trim();
+  if (!content || !currentRoomId) return;
+
+  if (!socket.connected) {
+    alert('Reconnecting — try again in a moment.');
+    return;
+  }
+
+  socket.emit('message', { room_id: currentRoomId, content });
+  chatInputEl.value = '';
+  stopTyping();
+}
+
+chatSendBtn.addEventListener('click', sendMessage);
+chatInputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// ─── Typing (outgoing) ───────────────────────────────────────
+chatInputEl.addEventListener('input', () => {
+  if (!currentRoomId || !socket.connected) return;
+
+  if (!typingActive) {
+    typingActive = true;
+    socket.emit('typing', { room_id: currentRoomId });
+  }
+
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(stopTyping, 2000);
+});
+
+function stopTyping() {
+  if (typingActive && currentRoomId && socket.connected) {
+    socket.emit('stop_typing', { room_id: currentRoomId });
+  }
+  typingActive = false;
+  clearTimeout(typingTimer);
+}
+
+// ─── Typing (incoming) ───────────────────────────────────────
+socket.on('typing', data => {
+  if (data.room_id !== currentRoomId) return;
+  typingTextEl.textContent = `${data.name} is typing…`;
+  typingEl.classList.remove('hidden');
+  clearTimeout(peerTypingTO);
+  peerTypingTO = setTimeout(() => {
+    typingEl.classList.add('hidden');
+  }, 3000);
+});
+
+socket.on('stop_typing', data => {
+  if (data.room_id !== currentRoomId) return;
+  typingEl.classList.add('hidden');
+  clearTimeout(peerTypingTO);
+});
+
+// ─── Incoming message ────────────────────────────────────────
+socket.on('message', m => {
+  // Is this the currently open room?
+  if (m.user_id !== window.ME_ID && m.room_id !== currentRoomId) {
+    // It's for a different room — just refresh the room list
+    loadRooms();
+    playPing();
+    return;
+  }
+
+  if (!m.mine) {
+    playPing();
+  }
+
+  // Update local room object
+  const room = rooms.find(r => r.id === m.room_id);
+  if (room) {
+    room.last_message = m.content;
+    room.last_time = m.time;
+    room.last_is_mine = m.mine;
+    if (!m.mine && m.room_id !== currentRoomId) {
+      room.unread = (room.unread || 0) + 1;
+    } else if (m.room_id === currentRoomId) {
+      room.unread = 0;
     }
+    renderRooms();
+  }
+
+  if (m.room_id === currentRoomId) {
+    appendMessage(m);
+
+    // Acknowledge read for incoming
+    if (!m.mine) {
+      socket.emit('read', { room_id: currentRoomId });
+    }
+  } else {
     loadRooms();
   }
+});
 
-  function showConvo() {
-    screenRooms.classList.add('hidden');
-    screenConvo.classList.remove('hidden');
-    setTimeout(() => inputEl.focus(), 150);
+// ─── Read receipts ───────────────────────────────────────────
+socket.on('read', data => {
+  if (data.room_id !== currentRoomId) return;
+  // Mark all my ticks as read
+  chatMessagesEl.querySelectorAll('.msg.mine .msg-tick').forEach(el => {
+    el.classList.add('read');
+    el.textContent = '✓✓';
+  });
+});
+
+socket.on('room_read', data => {
+  const room = rooms.find(r => r.id === data.room_id);
+  if (room) { room.unread = 0; renderRooms(); }
+});
+
+// ─── Room list live updates ──────────────────────────────────
+socket.on('room_update', data => {
+  const room = rooms.find(r => r.id === data.room_id);
+  if (!room) { loadRooms(); return; }
+  room.last_message = data.last_message;
+  room.last_time = data.last_time;
+  room.unread = data.unread;
+  room.last_is_mine = false;
+  renderRooms();
+
+  if (data.from_user_id !== window.ME_ID && data.room_id !== currentRoomId) {
+    playPing();
+  }
+});
+
+// ─── Presence ────────────────────────────────────────────────
+socket.on('presence', data => {
+  if (data.online) {
+    onlineUsers.add(data.user_id);
+  } else {
+    onlineUsers.delete(data.user_id);
   }
 
-  convoBackBtn.addEventListener('click', showRooms);
-
-  window.addEventListener('popstate', () => {
-    if (!screenConvo.classList.contains('hidden')) {
-      showRooms();
+  // Update header if the peer in current room changed status
+  if (currentRoom && !currentRoom.is_group
+      && data.user_id === currentRoom.other_user_id) {
+    currentRoom.online = data.online;
+    if (!data.online && data.last_seen) {
+      currentRoom.last_seen = data.last_seen;
     }
-  });
+    updatePresenceHeader();
+    renderRooms();
+  } else {
+    // Update online dot in room list
+    rooms.forEach(r => {
+      if (!r.is_group && r.other_user_id === data.user_id) {
+        r.online = data.online;
+      }
+    });
+    renderRooms();
+  }
+});
 
-  // ─────────────────────────────────────────
-  // ROOMS
-  // ─────────────────────────────────────────
-  async function loadRooms() {
-    try {
-      const r = await fetch('/api/chat/rooms');
-      const rooms = await r.json();
+function updatePresenceHeader() {
+  if (!currentRoom || currentRoom.is_group) {
+    chatSubtitleEl.textContent = currentRoom
+      ? `${currentRoom.member_count} members`
+      : '';
+    return;
+  }
+  if (currentRoom.online) {
+    chatSubtitleEl.innerHTML =
+      '<span style="color:#22c55e;">● Online</span>';
+  } else if (currentRoom.last_seen) {
+    chatSubtitleEl.textContent = `Last seen ${timeAgo(currentRoom.last_seen)}`;
+  } else {
+    chatSubtitleEl.textContent = 'Offline';
+  }
+}
 
-      if (!rooms.length) {
-        roomListEl.innerHTML = `
-          <div class="chat-empty">
-            <div class="chat-empty-emoji">💬</div>
-            <div class="chat-empty-title">No conversations yet</div>
-            <div class="chat-empty-sub">Tap the 🔍 icon to find someone, or the + button to start a group.</div>
+function timeAgo(iso) {
+  if (!iso) return '';
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+// ─── Reconnect handling ──────────────────────────────────────
+socket.on('connect', () => {
+  if (currentRoomId) {
+    socket.emit('join', { room_id: currentRoomId });
+    socket.emit('read', { room_id: currentRoomId });
+  }
+  loadRooms();
+});
+
+// ─── Back button ─────────────────────────────────────────────
+convoBackBtn.addEventListener('click', () => {
+  stopTyping();
+  socket.emit('leave', { room_id: currentRoomId });
+  typingEl.classList.add('hidden');
+  newPillEl.classList.add('hidden');
+  currentRoomId = null;
+  currentRoom = null;
+  screenConvo.classList.add('hidden');
+  screenRooms.classList.remove('hidden');
+  loadRooms();
+});
+
+// ─── Search ──────────────────────────────────────────────────
+searchToggleBtn.addEventListener('click', () => {
+  searchBar.classList.toggle('hidden');
+  if (!searchBar.classList.contains('hidden')) searchInput.focus();
+});
+searchCloseBtn.addEventListener('click', () => {
+  searchBar.classList.add('hidden');
+  searchInput.value = '';
+  searchResults.classList.add('hidden');
+});
+
+let searchTO = null;
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim();
+  clearTimeout(searchTO);
+  if (!q) { searchResults.classList.add('hidden'); return; }
+  searchTO = setTimeout(() => runSearch(q), 220);
+});
+
+async function runSearch(q) {
+  try {
+    const r = await fetch(`/api/users/search?q=${encodeURIComponent(q)}`,
+                          { credentials: 'same-origin' });
+    if (!r.ok) throw new Error();
+    const users = await r.json();
+    if (!users.length) {
+      searchResults.innerHTML = '<div class="empty" style="padding:16px;">No users found.</div>';
+    } else {
+      searchResults.innerHTML = users.map(u => `
+        <div class="search-row" data-uid="${u.id}" data-name="${esc(u.name)}">
+          <div class="room-avatar avatar-blank">${esc(initials(u.name))}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;">${esc(u.name)}</div>
+            <div style="font-size:12px;opacity:.6;">${esc(u.email)}</div>
           </div>
-        `;
-        return;
-      }
-
-      roomListEl.innerHTML = rooms.map(roomItem).join('');
-    } catch (e) {
-      console.error('loadRooms failed:', e);
-      roomListEl.innerHTML = '<div class="empty">Could not load chats.</div>';
+        </div>`).join('');
     }
-  }
+    searchResults.classList.remove('hidden');
+  } catch (_) {}
+}
 
-  function roomItem(r) {
-    const avatarHtml = r.is_group
-      ? `<div class="room-avatar room-avatar-group">👥</div>`
-      : (r.avatar
-          ? `<img class="room-avatar" src="${esc(r.avatar)}" alt="">`
-          : `<div class="room-avatar room-avatar-blank"></div>`);
-
-    return `
-      <button class="room-item" data-id="${r.id}" data-name="${esc(r.name)}" data-group="${r.is_group}">
-        ${avatarHtml}
-        <div class="room-info">
-          <div class="room-name">${esc(r.name)}</div>
-          <div class="room-last">${esc(r.last_message) || 'No messages yet'}</div>
-        </div>
-        <div class="room-time">${esc(r.last_time)}</div>
-      </button>
-    `;
-  }
-
-  roomListEl.addEventListener('click', async (e) => {
-    const item = e.target.closest('.room-item');
-    if (!item) return;
-    const id = parseInt(item.dataset.id, 10);
-    const isGroup = item.dataset.group === 'true';
-    await openRoom(id, item.dataset.name, isGroup);
-  });
-
-  // ─────────────────────────────────────────
-  // OPEN A ROOM
-  // ─────────────────────────────────────────
-  async function openRoom(id, name, isGroup) {
-    if (currentRoom && currentRoom !== id) {
-      socket.emit('leave', { room_id: currentRoom });
-    }
-    currentRoom = id;
-
-    titleEl.textContent = name;
-    subtitleEl.textContent = isGroup ? 'Group chat' : 'Direct message';
-
-    if (!isGroup) {
-      const meta = await getRoomMeta(id);
-      if (meta.avatar) {
-        peerAvatar.innerHTML = `<img src="${esc(meta.avatar)}" alt="">`;
-      } else {
-        peerAvatar.innerHTML = `<div class="room-avatar-blank"></div>`;
-      }
-    } else {
-      peerAvatar.innerHTML = `<div class="room-avatar room-avatar-group" style="width:36px;height:36px;font-size:15px;">👥</div>`;
-    }
-
-    showConvo();
-
-    messagesEl.innerHTML = '<div class="empty">Loading…</div>';
-    try {
-      const r = await fetch(`/api/chat/rooms/${id}/messages`);
-      const msgs = await r.json();
-      renderMessages(msgs);
-      socket.emit('join', { room_id: id });
-    } catch {
-      messagesEl.innerHTML = '<div class="empty">Could not load messages.</div>';
-    }
-  }
-
-  async function getRoomMeta(id) {
-    try {
-      const r = await fetch('/api/chat/rooms');
-      const rooms = await r.json();
-      return rooms.find(x => x.id === id) || { name: 'Chat', avatar: null };
-    } catch {
-      return { name: 'Chat', avatar: null };
-    }
-  }
-
-  function renderMessages(msgs) {
-    if (!msgs.length) {
-      messagesEl.innerHTML = '<div class="empty">No messages yet. Say hi!</div>';
-      return;
-    }
-    messagesEl.innerHTML = msgs.map(messageHtml).join('');
-    scrollToBottom();
-  }
-
-  function scrollToBottom() {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
-  function messageHtml(m) {
-    const avatarHtml = m.mine
-      ? ''
-      : (m.avatar
-          ? `<img class="msg-avatar" src="${esc(m.avatar)}" alt="">`
-          : `<div class="msg-avatar msg-avatar-blank"></div>`);
-
-    return `
-      <div class="msg ${m.mine ? 'mine' : ''}">
-        ${avatarHtml}
-        <div class="msg-bubble">
-          ${!m.mine ? `<div class="msg-author">${esc(m.author)}</div>` : ''}
-          <div class="msg-content">${esc(m.content)}</div>
-          <div class="msg-time">${esc(m.time)}</div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ─────────────────────────────────────────
-  // SEND MESSAGE
-  // ─────────────────────────────────────────
-  function send() {
-    const content = inputEl.value.trim();
-    if (!content || !currentRoom) return;
-    socket.emit('message', { room_id: currentRoom, content });
-    inputEl.value = '';
-    inputEl.focus();
-  }
-
-  sendEl.addEventListener('click', send);
-  inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  });
-
-  socket.on('message', (m) => {
-    if (!currentRoom) return;
-    const emptyState = messagesEl.querySelector('.empty');
-    if (emptyState) emptyState.remove();
-    messagesEl.insertAdjacentHTML('beforeend', messageHtml({ ...m, mine: false }));
-    scrollToBottom();
-  });
-
-  // ─────────────────────────────────────────
-  // SEARCH — by name or email
-  // ─────────────────────────────────────────
-  console.log('[CHAT] search elements:', {
-    btn: !!searchToggleBtn,
-    bar: !!searchBar,
-    input: !!searchInput,
-  });
-
-  searchToggleBtn.addEventListener('click', () => {
-    console.log('[CHAT] search clicked');
-    searchBar.classList.toggle('hidden');
-    if (!searchBar.classList.contains('hidden')) {
-      setTimeout(() => searchInput.focus(), 100);
-    } else {
-      searchResults.classList.add('hidden');
-      searchInput.value = '';
-    }
-  });
-
-  searchCloseBtn.addEventListener('click', () => {
+searchResults.addEventListener('click', async e => {
+  const row = e.target.closest('.search-row');
+  if (!row) return;
+  const uid = row.dataset.uid;
+  try {
+    const r = await fetch(`/api/chat/dm/${uid}`,
+                          { method: 'POST', credentials: 'same-origin' });
+    if (!r.ok) throw new Error();
+    const room = await r.json();
     searchBar.classList.add('hidden');
-    searchResults.classList.add('hidden');
     searchInput.value = '';
-  });
-
-  let searchTimer = null;
-  searchInput.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    const q = searchInput.value.trim();
-    if (q.length < 1) {
-      searchResults.classList.add('hidden');
-      searchResults.innerHTML = '';
-      return;
-    }
-    searchTimer = setTimeout(() => runSearch(q), 200);
-  });
-
-  async function runSearch(q) {
-    console.log('[CHAT] searching:', q);
-    try {
-      const r = await fetch('/api/users/search?q=' + encodeURIComponent(q));
-      if (!r.ok) {
-        searchResults.classList.remove('hidden');
-        searchResults.innerHTML = `<div class="search-empty">Error ${r.status}</div>`;
-        return;
-      }
-      const users = await r.json();
-      console.log('[CHAT] results:', users);
-
-      searchResults.classList.remove('hidden');
-
-      if (!users.length) {
-        searchResults.innerHTML = '<div class="search-empty">No students found.</div>';
-        return;
-      }
-
-      searchResults.innerHTML = users.map(u => {
-        const avatarHtml = u.avatar
-          ? `<img class="search-avatar" src="${esc(u.avatar)}" alt="">`
-          : `<div class="search-avatar search-avatar-blank"></div>`;
-        const isExisting = u.existing_room_id ? 'Open' : 'Message';
-        return `
-          <button class="search-item" data-uid="${u.id}" data-rid="${u.existing_room_id || ''}" data-name="${esc(u.name)}">
-            ${avatarHtml}
-            <div class="search-body">
-              <div class="search-name">${esc(u.name)}</div>
-              <div class="search-meta">${esc(u.email)}</div>
-            </div>
-            <span class="search-action">${isExisting}</span>
-          </button>
-        `;
-      }).join('');
-    } catch (err) {
-      console.error('[CHAT] search error:', err);
-      searchResults.classList.remove('hidden');
-      searchResults.innerHTML = '<div class="search-empty">Could not reach server.</div>';
-    }
-  }
-
-  searchResults.addEventListener('click', async (e) => {
-    const item = e.target.closest('.search-item');
-    if (!item) return;
-
-    const uid = parseInt(item.dataset.uid, 10);
-    const rid = item.dataset.rid ? parseInt(item.dataset.rid, 10) : null;
-    const name = item.dataset.name;
-
-    let roomId = rid;
-
-    if (!roomId) {
-      const r = await fetch(`/api/chat/dm/${uid}`, { method: 'POST' });
-      const data = await r.json();
-      if (data.error) return alert(data.error);
-      roomId = data.id;
-    }
-
-    searchBar.classList.add('hidden');
     searchResults.classList.add('hidden');
-    searchInput.value = '';
-
-    await openRoom(roomId, name, false);
-  });
-
-  // ─────────────────────────────────────────
-  // NEW GROUP MODAL
-  // ─────────────────────────────────────────
-  async function loadUsersForPicker() {
-    try {
-      const r = await fetch('/api/users');
-      const users = await r.json();
-      if (!users.length) {
-        groupUserPicker.innerHTML = '<div class="empty">No verified users yet.</div>';
-        return;
-      }
-      groupUserPicker.innerHTML = users.map(u => `
-        <label class="user-pick-item">
-          <input type="checkbox" value="${u.id}">
-          ${u.avatar
-            ? `<img src="${esc(u.avatar)}" alt="">`
-            : `<div class="user-pick-avatar-blank"></div>`}
-          <span>${esc(u.name)}</span>
-        </label>
-      `).join('');
-    } catch {
-      groupUserPicker.innerHTML = '<div class="empty">Could not load users.</div>';
-    }
+    await loadRooms();
+    openRoom(room.id);
+  } catch (_) {
+    alert('Could not open chat.');
   }
+});
 
-  function openNewGroup() {
-    selectedUsers.clear();
-    newGroupName.value = '';
-    loadUsersForPicker();
-    newGroupModal.classList.add('open');
-    document.body.style.overflow = 'hidden';
+// ─── New group ───────────────────────────────────────────────
+startNewBtn.addEventListener('click', () => {
+  searchBar.classList.remove('hidden');
+  searchInput.focus();
+});
+newGroupBtn.addEventListener('click', async () => {
+  newGroupModal.classList.add('open');
+  newGroupName.value = '';
+  groupUserPicker.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await fetch('/api/users', { credentials: 'same-origin' });
+    const users = await r.json();
+    groupUserPicker.innerHTML = users.map(u => `
+      <label class="user-pick">
+        <input type="checkbox" value="${u.id}">
+        <span>${esc(u.name)}</span>
+      </label>`).join('');
+  } catch (_) {
+    groupUserPicker.innerHTML = '<div class="empty">Failed.</div>';
   }
+});
+newGroupClose.addEventListener('click', () => newGroupModal.classList.remove('open'));
+newGroupModal.addEventListener('click', e => {
+  if (e.target === newGroupModal) newGroupModal.classList.remove('open');
+});
 
-  function closeNewGroup() {
-    newGroupModal.classList.remove('open');
-    document.body.style.overflow = '';
-  }
-
-  if (newGroupBtn) newGroupBtn.addEventListener('click', openNewGroup);
-  if (startNewBtn) startNewBtn.addEventListener('click', openNewGroup);
-  if (newGroupClose) newGroupClose.addEventListener('click', closeNewGroup);
-  if (newGroupModal) newGroupModal.addEventListener('click', (e) => {
-    if (e.target === newGroupModal) closeNewGroup();
-  });
-
-  if (groupUserPicker) groupUserPicker.addEventListener('change', (e) => {
-    const id = parseInt(e.target.value, 10);
-    if (e.target.checked) selectedUsers.add(id);
-    else selectedUsers.delete(id);
-  });
-
-  if (newGroupCreate) newGroupCreate.addEventListener('click', async () => {
-    const name = newGroupName.value.trim();
-    if (!name) return alert('Enter a group name');
-    if (selectedUsers.size < 2) return alert('Pick at least 2 members');
-
+newGroupCreate.addEventListener('click', async () => {
+  const name = newGroupName.value.trim();
+  const ids = [...groupUserPicker.querySelectorAll('input:checked')]
+    .map(i => parseInt(i.value, 10));
+  if (!name) { alert('Name required'); return; }
+  if (ids.length < 2) { alert('Pick at least 2 members'); return; }
+  try {
     const r = await fetch('/api/chat/group', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, member_ids: Array.from(selectedUsers) })
+      credentials: 'same-origin',
+      body: JSON.stringify({ name, member_ids: ids }),
     });
-    const data = await r.json();
-    if (data.error) return alert(data.error);
-
-    closeNewGroup();
-    openRoom(data.id, data.name, true);
-  });
-
-  // ─────────────────────────────────────────
-  // AUTO-OPEN DM (from ?dm=<uid>)
-  // ─────────────────────────────────────────
-  async function checkDmQuery() {
-    const params = new URLSearchParams(window.location.search);
-    const uid = parseInt(params.get('dm') || '0', 10);
-    if (!uid) return;
-
-    try {
-      const r = await fetch(`/api/chat/dm/${uid}`, { method: 'POST' });
-      if (!r.ok) return;
-      const data = await r.json();
-      if (data.error) return;
-      await openRoom(data.id, data.name, false);
-    } catch (e) {
-      console.error('DM auto-open failed:', e);
-    }
+    if (!r.ok) throw new Error();
+    const room = await r.json();
+    newGroupModal.classList.remove('open');
+    await loadRooms();
+    openRoom(room.id);
+  } catch (_) {
+    alert('Could not create group.');
   }
+});
 
-  // ─────────────────────────────────────────
-  // HELPERS
-  // ─────────────────────────────────────────
-  function esc(s) {
-    return String(s || '').replace(/[&<>"']/g, m => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[m]));
-  }
-
-  // ─────────────────────────────────────────
-  // INIT
-  // ─────────────────────────────────────────
-  loadRooms().then(() => checkDmQuery());
-
+// ─── Boot ────────────────────────────────────────────────────
+loadRooms();
 })();

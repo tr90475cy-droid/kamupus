@@ -89,6 +89,15 @@
       <div class="empty">Loading…</div>
     </div>
 
+<div class="chat-typing hidden" id="typingIndicator">
+  <span class="chat-typing-dots"><span></span><span></span><span></span></span>
+  <span id="typingText">typing…</span>
+</div>
+
+<button class="chat-newpill hidden" id="newMessagesPill">
+  ↓ New messages
+</button>
+
     <form class="chat-composer" id="chatComposer" onsubmit="return false;">
       <input
         type="text"
@@ -132,6 +141,5 @@
 
 {% endblock %}
 {% block scripts %}
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
 {% endblock %}
