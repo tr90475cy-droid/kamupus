@@ -2,6 +2,16 @@ import eventlet
 eventlet.monkey_patch()
 
 import os
+import time
+import uuid
+import json
+import requests
+import threading
+from datetime import datetime, timedelta
+from functools import wraps
+
+_online_lock = threading.Lock()
+_online_users = {}          # user_id -> set of sid
 
 try:
     from dotenv import load_dotenv
@@ -9,14 +19,6 @@ try:
 except ImportError:
     pass
 
-import json
-import uuid
-import requests
-import threading
-_online_lock = threading.Lock()
-_online_users = {}          # user_id -> set of sid
-from datetime import datetime, timedelta
-from functools import wraps
 from flask import (Flask, render_template, request, redirect, url_for,
                    session, jsonify, send_from_directory, flash, abort)
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -28,8 +30,10 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     ChatRoom, ChatMember, ChatMessage,
                     Listing, Assignment, Event, EventRSVP, Connection,
                     Follow, ProfileView, AdminAction, AdPayment)
-from ai_check import analyze_image
+# NOTE: analyze_image is imported lazily inside verify() so heavy ML
+# dependencies don't crash Railway boot.
 from sqlalchemy.orm import joinedload
+from sqlalchemy import func, text
 
 # ─────────────────────────────────────────────
 # SUPABASE STORAGE SETUP
@@ -113,7 +117,7 @@ def get_ad_price(days):
 def generate_ref(prefix):
     u = current_user()
     uid = u.id if u else 0
-    return f'KAMUPUS-{prefix}-{uid}-{int(datetime.utcnow().timestamp())}'
+    return f'KAMUPUS-{prefix}-{uid}-{uuid.uuid4().hex[:10]}'
 
 # ─────────────────────────────────────────────
 # JINJA FILTERS
@@ -173,7 +177,7 @@ def verified_required(f):
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
 def save_upload(file, prefix):
-    """Upload to Supabase Storage via direct HTTPS API (avoids supabase-py bugs)."""
+    """Upload to Supabase Storage via direct HTTPS API."""
     global _last_upload_error
     _last_upload_error = None
 
@@ -303,22 +307,32 @@ def is_admin_unlocked():
     return True
 
 # ─────────────────────────────────────────────
-# ROOT
+# HEALTH
 # ─────────────────────────────────────────────
 @app.route('/health')
 def health():
+    """Fast liveness probe — does NOT touch the DB.
+    Railway uses this. If it fails, the worker is truly hung."""
     return 'ok', 200
 
 
 @app.route('/health-db')
 def health_db():
-    from sqlalchemy import text
+    """Manual DB check for debugging."""
     try:
         db.session.execute(text('SELECT 1'))
         return 'ok', 200
     except Exception as e:
-        return str(e), 500
-        
+        return f'db error: {e}', 503
+
+
+@app.route('/health-lite')
+def health_lite():
+    return 'ok', 200
+
+# ─────────────────────────────────────────────
+# ROOT
+# ─────────────────────────────────────────────
 @app.route('/')
 def index():
     u = current_user()
@@ -446,6 +460,8 @@ def verify():
             with open(local_path, 'wb') as fh:
                 fh.write(file_bytes)
             try:
+                # Lazy import — heavy ML deps only loaded here
+                from ai_check import analyze_image
                 score, flags = analyze_image(local_path)
             except Exception as e:
                 print(f'⚠ analyze_image failed: {e}')
@@ -477,8 +493,9 @@ def verify():
             flash(f'Upload failed — {_last_upload_error or "please try again"}', 'error')
             return render_template('verify.html', form=request.form)
 
+        # Upload succeeded → now safe to remove the old one
+        old_path = existing_by_user.admission_letter_path if existing_by_user else None
         if existing_by_user:
-            delete_upload(existing_by_user.admission_letter_path)
             db.session.delete(existing_by_user)
             db.session.commit()
 
@@ -489,6 +506,8 @@ def verify():
         db.session.add(v)
         u.verification_status = 'pending'
         db.session.commit()
+        if old_path:
+            delete_upload(old_path)
         return redirect(url_for('pending'))
 
     return render_template('verify.html', form={})
@@ -513,8 +532,16 @@ def home():
 # ─────────────────────────────────────────────
 # FEED
 # ─────────────────────────────────────────────
-def serialize_post(p, me_id):
-    liked = any(l.user_id == me_id for l in p.likes)
+def serialize_post(p, me_id, like_count=None, comment_count=None, liked=None):
+    """Serialize a post. Pass like_count/comment_count/liked explicitly
+    when serializing in bulk (avoids per-post lazy loads)."""
+    if liked is None:
+        liked = any(l.user_id == me_id for l in p.likes)
+    if like_count is None:
+        like_count = len(p.likes)
+    if comment_count is None:
+        comment_count = len(p.comments)
+
     if p.anonymous:
         author, avatar, user_id = 'Anonymous Student', None, None
     else:
@@ -522,14 +549,40 @@ def serialize_post(p, me_id):
         avatar = user_avatar(p.author)
         user_id = p.author.id
 
+    author_verified = bool(
+        (not p.anonymous) and p.author
+        and getattr(p.author, 'verification_status', None) == 'verified'
+    )
+
     return {
         'id': p.id, 'user_id': user_id, 'author': author, 'avatar': avatar,
-        'anonymous': p.anonymous, 'verified': not p.anonymous,
+        'anonymous': p.anonymous, 'verified': author_verified,
         'time': time_ago(p.created_at), 'tag': p.tag, 'content': p.content,
         'image': get_file_url(p.image_path),
-        'likes': len(p.likes), 'comments': len(p.comments), 'liked': liked,
+        'likes': like_count, 'comments': comment_count, 'liked': liked,
         'mine': p.user_id == me_id,
     }
+
+def _batch_post_counts(post_ids, me_id):
+    """Single-query counts for a list of posts."""
+    if not post_ids:
+        return {}, {}, set()
+    like_map = dict(
+        db.session.query(Like.post_id, func.count(Like.id))
+        .filter(Like.post_id.in_(post_ids))
+        .group_by(Like.post_id)
+        .all()
+    )
+    cmt_map = dict(
+        db.session.query(Comment.post_id, func.count(Comment.id))
+        .filter(Comment.post_id.in_(post_ids))
+        .group_by(Comment.post_id)
+        .all()
+    )
+    liked_ids = {r[0] for r in db.session.query(Like.post_id)
+                 .filter(Like.user_id == me_id, Like.post_id.in_(post_ids))
+                 .all()}
+    return like_map, cmt_map, liked_ids
 
 @app.route('/api/feed')
 @verified_required
@@ -540,14 +593,14 @@ def api_feed():
     followed_ids = {r.following_id for r in Follow.query.filter_by(follower_id=me.id).all()}
 
     like_counts = dict(
-        db.session.query(Post.user_id, db.func.count(Like.id))
+        db.session.query(Post.user_id, func.count(Like.id))
         .join(Like, Like.post_id == Post.id)
         .filter(Like.user_id == me.id)
         .group_by(Post.user_id).all()
     )
 
     view_counts = dict(
-        db.session.query(ProfileView.viewed_id, db.func.count(ProfileView.id))
+        db.session.query(ProfileView.viewed_id, func.count(ProfileView.id))
         .filter(ProfileView.viewer_id == me.id)
         .group_by(ProfileView.viewed_id).all()
     )
@@ -558,18 +611,16 @@ def api_feed():
         .distinct().all()
     interest_tags = {t[0] for t in tag_rows if t[0]}
 
-    # ── THE FIX: eager-load author, likes, comments in ONE query
-    q = Post.query.options(
-        joinedload(Post.author),
-        joinedload(Post.likes),
-        joinedload(Post.comments),
-    )
+    q = Post.query.options(joinedload(Post.author))
     if f == 'anon':
         q = q.filter_by(anonymous=True)
     elif f in ('gist', 'parties', 'market', 'assign'):
         q = q.filter_by(tag=f)
 
-    posts = q.limit(50).all()   # was 300 — 6× less data
+    posts = q.limit(30).all()
+    post_ids = [p.id for p in posts]
+    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me.id)
+
     now = datetime.utcnow()
 
     def score(p):
@@ -585,7 +636,16 @@ def api_feed():
         return s
 
     posts.sort(key=score, reverse=True)
-    return jsonify([serialize_post(p, me.id) for p in posts])
+
+    return jsonify([
+        serialize_post(
+            p, me.id,
+            like_count=like_map.get(p.id, 0),
+            comment_count=cmt_map.get(p.id, 0),
+            liked=(p.id in liked_ids),
+        )
+        for p in posts
+    ])
 
 @app.route('/api/posts', methods=['POST'])
 @verified_required
@@ -609,14 +669,15 @@ def api_create_post():
         tag = d.get('tag') or ('anon' if anon else 'gist')
         image_path = None
 
-    if not content:
-        return jsonify({'error': 'Content required'}), 400
+    if not content and not image_path:
+        return jsonify({'error': 'Content or image required'}), 400
 
     p = Post(user_id=current_user().id, content=content,
              anonymous=anon, tag=tag, image_path=image_path)
     db.session.add(p)
     db.session.commit()
-    return jsonify(serialize_post(p, current_user().id))
+    return jsonify(serialize_post(p, current_user().id,
+                                  like_count=0, comment_count=0, liked=False))
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 @verified_required
@@ -650,7 +711,8 @@ def api_like(pid):
     else:
         db.session.add(Like(user_id=me, post_id=pid)); liked = True
     db.session.commit()
-    return jsonify({'liked': liked, 'likes': len(p.likes)})
+    like_count = Like.query.filter_by(post_id=pid).count()
+    return jsonify({'liked': liked, 'likes': like_count})
 
 @app.route('/api/posts/<int:pid>/comments', methods=['GET', 'POST'])
 @verified_required
@@ -878,7 +940,10 @@ def api_promote_listing(listing_id):
         return jsonify({'error': 'Cannot promote a sold listing'}), 400
 
     d = request.get_json() or {}
-    days = int(d.get('days', 0))
+    try:
+        days = int(d.get('days', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid duration'}), 400
     if days not in [t['days'] for t in AD_PRICING]:
         return jsonify({'error': 'Invalid duration'}), 400
 
@@ -1010,7 +1075,7 @@ def api_assignments():
             return jsonify({'error': 'Title, course code and due date required'}), 400
 
         try:
-            due_date = datetime.fromisoformat(due_str.replace('Z', ''))
+            due_date = datetime.fromisoformat(str(due_str).replace('Z', ''))
         except ValueError:
             return jsonify({'error': 'Invalid date'}), 400
 
@@ -1167,7 +1232,6 @@ def serialize_room_for(r, me, unread_count=0):
         other_last_seen = (other.last_seen.isoformat()
                            if other and other.last_seen else None)
 
-    # ← the only change: use the passed-in count, don't query
     unread = unread_count
     unread_label = ''
     if unread > 0:
@@ -1191,8 +1255,6 @@ def serialize_room_for(r, me, unread_count=0):
 def api_chat_rooms_list():
     me = current_user()
 
-    # Eager-load messages + members so r.messages[-1] and r.members
-    # don't trigger extra queries per room
     rooms = (ChatRoom.query
              .join(ChatMember)
              .filter(ChatMember.user_id == me.id)
@@ -1205,10 +1267,9 @@ def api_chat_rooms_list():
     if not rooms:
         return jsonify([])
 
-    # One query for ALL unread counts (was 1 per room)
     room_ids = [r.id for r in rooms]
     unread_rows = (db.session.query(
-        ChatMessage.room_id, db.func.count(ChatMessage.id)
+        ChatMessage.room_id, func.count(ChatMessage.id)
     ).filter(
         ChatMessage.room_id.in_(room_ids),
         ChatMessage.user_id != me.id,
@@ -1238,7 +1299,6 @@ def api_chat_unread(rid):
                      ChatMessage.read_at.is_(None))
              .count())
     return jsonify({'count': count})
-
 
 @app.route('/api/chat/total-unread')
 @verified_required
@@ -1287,7 +1347,7 @@ def api_chat_group_create():
 
     all_ids = set(member_ids) | {me.id}
     for uid in all_ids:
-        if User.query.get(uid):
+        if db.session.get(User, uid):
             db.session.add(ChatMember(room_id=room.id, user_id=uid))
     db.session.commit()
     return jsonify({'id': room.id, 'name': room.name, 'is_group': True})
@@ -1481,8 +1541,17 @@ def api_me_update():
 @verified_required
 def api_my_posts():
     me = current_user()
-    posts = Post.query.filter_by(user_id=me.id).order_by(Post.created_at.desc()).limit(50).all()
-    return jsonify([serialize_post(p, me.id) for p in posts])
+    posts = Post.query.options(joinedload(Post.author))\
+        .filter_by(user_id=me.id).order_by(Post.created_at.desc()).limit(50).all()
+    post_ids = [p.id for p in posts]
+    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me.id)
+    return jsonify([
+        serialize_post(p, me.id,
+                       like_count=like_map.get(p.id, 0),
+                       comment_count=cmt_map.get(p.id, 0),
+                       liked=(p.id in liked_ids))
+        for p in posts
+    ])
 
 @app.route('/api/me/picture', methods=['POST'])
 @verified_required
@@ -1494,14 +1563,17 @@ def api_me_picture():
     if not allowed_image(file.filename):
         return jsonify({'error': 'Only PNG, JPG, JPEG, WEBP allowed'}), 400
 
-    if u.profile_picture_path:
-        delete_upload(u.profile_picture_path)
-
     file_url = save_upload(file, f'avatar{u.id}')
     if not file_url:
         return jsonify({'error': f'Upload failed: {_last_upload_error or "unknown"}'}), 500
+
+    old_path = u.profile_picture_path
     u.profile_picture_path = file_url
     db.session.commit()
+
+    if old_path:
+        delete_upload(old_path)
+
     return jsonify({'ok': True, 'avatar': user_avatar(u)})
 
 @app.route('/api/me/picture', methods=['DELETE'])
@@ -1509,9 +1581,10 @@ def api_me_picture():
 def api_me_picture_delete():
     u = current_user()
     if u.profile_picture_path:
-        delete_upload(u.profile_picture_path)
+        path = u.profile_picture_path
         u.profile_picture_path = None
         db.session.commit()
+        delete_upload(path)
     return jsonify({'ok': True})
 
 @app.route('/api/users/<int:uid>/preview')
@@ -1773,9 +1846,18 @@ def user_profile(uid):
 @verified_required
 def api_user_posts(uid):
     me = current_user().id
-    posts = Post.query.filter_by(user_id=uid, anonymous=False)\
+    posts = Post.query.options(joinedload(Post.author))\
+        .filter_by(user_id=uid, anonymous=False)\
         .order_by(Post.created_at.desc()).limit(50).all()
-    return jsonify([serialize_post(p, me) for p in posts])
+    post_ids = [p.id for p in posts]
+    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me)
+    return jsonify([
+        serialize_post(p, me,
+                       like_count=like_map.get(p.id, 0),
+                       comment_count=cmt_map.get(p.id, 0),
+                       liked=(p.id in liked_ids))
+        for p in posts
+    ])
 
 @app.route('/api/me/following')
 @verified_required
@@ -1920,7 +2002,6 @@ def ws_connect():
                  {'user_id': u.id, 'online': True},
                  to=f'room_{m.room_id}')
 
-
 @socketio.on('disconnect')
 def ws_disconnect():
     u = current_user()
@@ -1947,7 +2028,6 @@ def ws_disconnect():
                   'last_seen': u.last_seen.isoformat()},
                  to=f'room_{m.room_id}')
 
-
 @socketio.on('join')
 def ws_join(data):
     rid = data.get('room_id')
@@ -1957,12 +2037,10 @@ def ws_join(data):
     if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
     join_room(f'room_{rid}')
 
-
 @socketio.on('leave')
 def ws_leave(data):
     rid = data.get('room_id')
     if rid: leave_room(f'room_{rid}')
-
 
 @socketio.on('message')
 def ws_message(data):
@@ -1990,16 +2068,20 @@ def ws_message(data):
     }
     emit('message', payload, to=f'room_{rid}')
 
-    # Push room-list updates + unread indicators to every other member
     room = ChatRoom.query.get(rid)
     if room:
+        unread_by_sender = dict(
+            db.session.query(ChatMessage.user_id, func.count(ChatMessage.id))
+            .filter(ChatMessage.room_id == rid, ChatMessage.read_at.is_(None))
+            .group_by(ChatMessage.user_id)
+            .all()
+        )
+        total_unread = sum(unread_by_sender.values())
+
         for m in room.members:
             if m.user_id == u.id:
                 continue
-            unread = (ChatMessage.query
-                      .filter_by(room_id=rid, read_at=None)
-                      .filter(ChatMessage.user_id != m.user_id)
-                      .count())
+            unread = total_unread - unread_by_sender.get(m.user_id, 0)
             unread_label = (f'{unread} new message' + ('s' if unread != 1 else '')) if unread > 0 else ''
             emit('room_update',
                  {
@@ -2014,7 +2096,6 @@ def ws_message(data):
                  },
                  to=f'user_{m.user_id}')
 
-
 @socketio.on('typing')
 def ws_typing(data):
     rid = data.get('room_id')
@@ -2027,7 +2108,6 @@ def ws_typing(data):
          {'room_id': rid, 'user_id': u.id, 'name': u.full_name},
          to=f'room_{rid}', include_self=False)
 
-
 @socketio.on('stop_typing')
 def ws_stop_typing(data):
     rid = data.get('room_id')
@@ -2037,7 +2117,6 @@ def ws_stop_typing(data):
     emit('stop_typing',
          {'room_id': rid, 'user_id': u.id},
          to=f'room_{rid}', include_self=False)
-
 
 @socketio.on('read')
 def ws_read(data):
@@ -2110,62 +2189,10 @@ def debug_supabase():
     return jsonify(result)
 
 # ─────────────────────────────────────────────
-# INIT
+# INIT — non-blocking, background thread
 # ─────────────────────────────────────────────
-with app.app_context():
-    db.create_all()
-
-    # Auto-migrate missing columns (works on SQLite + Postgres)
-    from sqlalchemy import inspect, text
-    insp = inspect(db.engine)
-    tables = set(insp.get_table_names())
-    wanted = {
-        'users': {
-            'whatsapp_number':         'VARCHAR(20)',
-            'bio':                     'VARCHAR(200)',
-            'subaccount_code':         'VARCHAR(50)',
-            'paystack_recipient_code': 'VARCHAR(50)',
-            'last_seen':               'TIMESTAMP',
-        },
-        'chat_messages': {
-            'read_at':                 'TIMESTAMP',
-        },
-    }
-    with db.engine.begin() as conn:
-        for table, cols in wanted.items():
-            if table not in tables:
-                continue
-            have = {c['name'] for c in insp.get_columns(table)}
-            for col, typ in cols.items():
-                if col not in have:
-                    try:
-                        conn.execute(text(
-                            f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ}'
-                        ))
-                        print(f'✓ auto-migrate: {table}.{col}')
-                    except Exception as e:
-                        print(f'⚠ auto-migrate {table}.{col}: {e}')
-
-    # Verify Supabase bucket exists at startup
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            base = SUPABASE_URL.rstrip('/')
-            check_url = f'{base}/storage/v1/bucket/{SUPABASE_BUCKET}'
-            res = requests.get(
-                check_url,
-                headers={'Authorization': f'Bearer {SUPABASE_KEY}'},
-                timeout=10,
-            )
-            if res.status_code == 200:
-                print(f'✓ Supabase bucket "{SUPABASE_BUCKET}" ready')
-            elif res.status_code == 404:
-                print(f'⚠ Supabase bucket "{SUPABASE_BUCKET}" not found!')
-                print(f'  → Create it in Supabase dashboard → Storage')
-            else:
-                print(f'⚠ Supabase bucket check: HTTP {res.status_code}: {res.text[:100]}')
-        except Exception as e:
-            print(f'⚠ Could not verify Supabase bucket: {type(e).__name__}: {e}')
-
+def _ensure_admin():
+    """Create or update the admin user. Called once after DB is ready."""
     admin_email = os.environ.get('ADMIN_EMAIL', 'oladipobright12@gmail.com')
     admin_pass = os.environ.get('ADMIN_PASSWORD', 'bright_kelvin*$')
 
@@ -2192,6 +2219,61 @@ with app.app_context():
             db.session.commit()
             print(f'✓ Admin created: {admin_email}')
 
+
+def _init_db():
+    """Runs in a background thread so gunicorn worker startup never blocks.
+    Railway healthcheck fires before this completes — that's fine because
+    /health doesn't touch the DB."""
+    with app.app_context():
+        for attempt in range(20):
+            try:
+                db.create_all()
+
+                from sqlalchemy import inspect
+                insp = inspect(db.engine)
+                tables = set(insp.get_table_names())
+                wanted = {
+                    'users': {
+                        'whatsapp_number':         'VARCHAR(20)',
+                        'bio':                     'VARCHAR(200)',
+                        'subaccount_code':         'VARCHAR(50)',
+                        'paystack_recipient_code': 'VARCHAR(50)',
+                        'last_seen':               'TIMESTAMP',
+                    },
+                    'chat_messages': {
+                        'read_at':                 'TIMESTAMP',
+                    },
+                }
+                with db.engine.begin() as conn:
+                    for table, cols in wanted.items():
+                        if table not in tables:
+                            continue
+                        have = {c['name'] for c in insp.get_columns(table)}
+                        for col, typ in cols.items():
+                            if col not in have:
+                                try:
+                                    conn.execute(text(
+                                        f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ}'
+                                    ))
+                                    print(f'✓ auto-migrate: {table}.{col}')
+                                except Exception as e:
+                                    print(f'⚠ auto-migrate {table}.{col}: {e}')
+
+                _ensure_admin()
+                print(f'✓ DB ready (attempt {attempt + 1})')
+                return
+            except Exception as e:
+                print(f'⚠ DB init attempt {attempt + 1} failed: {e}')
+                time.sleep(3)
+        print('❌ DB never came up after 20 attempts — app will serve 500s')
+
+
+# Fire-and-forget — gunicorn worker starts serving immediately.
+threading.Thread(target=_init_db, daemon=True).start()
+
+
+# NOTE: production runs via gunicorn (see Procfile). The block below is
+# for local development only — it is intentionally NOT reached in prod.
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') == 'development'
@@ -2206,7 +2288,4 @@ if __name__ == '__main__':
     print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
-    if debug:
-        socketio.run(app, debug=True, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
-    else:
-        socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+    socketio.run(app, debug=debug, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
