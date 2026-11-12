@@ -304,6 +304,20 @@ def is_admin_unlocked():
 # ─────────────────────────────────────────────
 # ROOT
 # ─────────────────────────────────────────────
+@app.route('/health')
+def health():
+    return 'ok', 200
+
+
+@app.route('/health-db')
+def health_db():
+    from sqlalchemy import text
+    try:
+        db.session.execute(text('SELECT 1'))
+        return 'ok', 200
+    except Exception as e:
+        return str(e), 500
+        
 @app.route('/')
 def index():
     u = current_user()
