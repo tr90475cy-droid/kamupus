@@ -17,19 +17,17 @@ def env_or(key, default):
 
 
 def force_psycopg_v3(url):
-    """Force any Postgres URL to use psycopg v3 driver.
-    Handles all formats:
-      postgres://...                -> postgresql+psycopg://...
-      postgresql://...              -> postgresql+psycopg://...
-      postgresql+psycopg2://...     -> postgresql+psycopg://...
-      postgresql+psycopg://...      -> unchanged
-    """
+    """Force Postgres URLs to use psycopg v3. Leave SQLite and others alone."""
     if not url:
         return url
-    if '://' not in url:
+    if url.startswith('sqlite:'):
         return url
-    tail = url.split('://', 1)[1]
-    return 'postgresql+psycopg://' + tail
+    if url.startswith('postgresql+psycopg://'):
+        return url
+    if url.startswith('postgres://') or url.startswith('postgresql://'):
+        tail = url.split('://', 1)[1]
+        return 'postgresql+psycopg://' + tail
+    return url
 
 
 class Config:

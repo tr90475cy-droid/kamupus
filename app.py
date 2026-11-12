@@ -29,6 +29,7 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     Listing, Assignment, Event, EventRSVP, Connection,
                     Follow, ProfileView, AdminAction, AdPayment)
 from ai_check import analyze_image
+from sqlalchemy.orm import joinedload
 
 # ─────────────────────────────────────────────
 # SUPABASE STORAGE SETUP
@@ -557,13 +558,18 @@ def api_feed():
         .distinct().all()
     interest_tags = {t[0] for t in tag_rows if t[0]}
 
-    q = Post.query
+    # ── THE FIX: eager-load author, likes, comments in ONE query
+    q = Post.query.options(
+        joinedload(Post.author),
+        joinedload(Post.likes),
+        joinedload(Post.comments),
+    )
     if f == 'anon':
         q = q.filter_by(anonymous=True)
     elif f in ('gist', 'parties', 'market', 'assign'):
         q = q.filter_by(tag=f)
 
-    posts = q.limit(300).all()
+    posts = q.limit(50).all()   # was 300 — 6× less data
     now = datetime.utcnow()
 
     def score(p):
@@ -579,7 +585,7 @@ def api_feed():
         return s
 
     posts.sort(key=score, reverse=True)
-    return jsonify([serialize_post(p, me.id) for p in posts[:100]])
+    return jsonify([serialize_post(p, me.id) for p in posts])
 
 @app.route('/api/posts', methods=['POST'])
 @verified_required
@@ -1146,7 +1152,7 @@ def chat():
 def dm_key_for(a, b):
     return '-'.join(map(str, sorted([a, b])))
 
-def serialize_room_for(r, me):
+def serialize_room_for(r, me, unread_count=0):
     last_msg = r.messages[-1] if r.messages else None
     if r.is_group:
         display_name, avatar, other_user_id = r.name, None, None
@@ -1161,11 +1167,8 @@ def serialize_room_for(r, me):
         other_last_seen = (other.last_seen.isoformat()
                            if other and other.last_seen else None)
 
-    unread = (ChatMessage.query
-              .filter_by(room_id=r.id, read_at=None)
-              .filter(ChatMessage.user_id != me.id)
-              .count())
-
+    # ← the only change: use the passed-in count, don't query
+    unread = unread_count
     unread_label = ''
     if unread > 0:
         unread_label = f'{unread} new message' + ('s' if unread != 1 else '')
@@ -1187,12 +1190,41 @@ def serialize_room_for(r, me):
 @verified_required
 def api_chat_rooms_list():
     me = current_user()
-    rooms = ChatRoom.query.join(ChatMember).filter(ChatMember.user_id == me.id).all()
+
+    # Eager-load messages + members so r.messages[-1] and r.members
+    # don't trigger extra queries per room
+    rooms = (ChatRoom.query
+             .join(ChatMember)
+             .filter(ChatMember.user_id == me.id)
+             .options(
+                 joinedload(ChatRoom.messages).joinedload(ChatMessage.user),
+                 joinedload(ChatRoom.members).joinedload(ChatMember.user),
+             )
+             .all())
+
+    if not rooms:
+        return jsonify([])
+
+    # One query for ALL unread counts (was 1 per room)
+    room_ids = [r.id for r in rooms]
+    unread_rows = (db.session.query(
+        ChatMessage.room_id, db.func.count(ChatMessage.id)
+    ).filter(
+        ChatMessage.room_id.in_(room_ids),
+        ChatMessage.user_id != me.id,
+        ChatMessage.read_at.is_(None),
+    ).group_by(ChatMessage.room_id).all())
+    unread_map = dict(unread_rows)
+
     rooms.sort(
         key=lambda r: r.messages[-1].created_at if r.messages else datetime.min,
         reverse=True
     )
-    return jsonify([serialize_room_for(r, me) for r in rooms])
+
+    return jsonify([
+        serialize_room_for(r, me, unread_map.get(r.id, 0))
+        for r in rooms
+    ])
 
 @app.route('/api/chat/rooms/<int:rid>/unread-count')
 @verified_required
