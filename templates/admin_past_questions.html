@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Admin · Past Questions{% endblock %}
+{% block content %}
+
+<div class="admin-wrap">
+  <div class="admin-head">
+    <div>
+      <h1>Past Questions <em>Review</em></h1>
+      <div class="sub">{{ pending|length }} pending · {{ recent|length }} recent</div>
+    </div>
+    <div class="admin-head-actions">
+      <a href="{{ url_for('admin') }}" class="btn btn-ghost btn-sm">← Admin</a>
+    </div>
+  </div>
+
+  <h2 class="admin-section-title">Pending</h2>
+  {% if not pending %}
+    <div class="empty">Nothing to review.</div>
+  {% endif %}
+
+  {% for p in pending %}
+    <div class="verify-card">
+      <div class="verify-head">
+        <div>
+          <div class="verify-name">{{ p.course_code }} — {{ p.year }}</div>
+          <div class="verify-contact">
+            {{ p.course_title or 'No title' }} ·
+            Level {{ p.level }} ·
+            {{ p.department or 'No dept' }} ·
+            by {{ p.uploader.full_name if p.uploader else 'Unknown' }}
+          </div>
+        </div>
+        <span class="tag tag-pending">pending</span>
+      </div>
+
+      <div class="verify-doc">
+        <a href="{{ p.file_path }}" target="_blank" rel="noopener">
+          📄 {{ p.file_name or 'View file' }}
+        </a>
+      </div>
+
+      <div class="verify-actions">
+        <form action="{{ url_for('admin_pq_approve', pqid=p.id) }}" method="post" style="flex:1;">
+          <button class="btn btn-success btn-block btn-sm" type="submit">Approve</button>
+        </form>
+        <form action="{{ url_for('admin_pq_reject', pqid=p.id) }}" method="post" class="reject-form">
+          <input type="text" name="reason" placeholder="Reason (optional)" class="reject-input">
+          <button class="btn btn-danger btn-sm" type="submit">Reject &amp; delete</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+
+  <h2 class="admin-section-title" style="margin-top: 32px;">Recently approved</h2>
+  <div class="recent-list">
+    {% for p in recent %}
+      <div class="verify-card">
+        <div class="recent-head">
+          <div>
+            <div class="recent-name">{{ p.course_code }} — {{ p.year }}</div>
+            <div class="recent-meta">
+              Level {{ p.level }} · {{ p.department or '—' }} · {{ p.downloads }} downloads
+            </div>
+          </div>
+          <span class="tag tag-approved">approved</span>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% endblock %}

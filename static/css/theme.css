@@ -523,9 +523,15 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 .tag-verified { background: var(--primary-soft); color: var(--primary); }
 
 /* ── CHAT ───────────────────────────────────────────── */
-.chat-app { width: 100%; max-width: 480px; margin: 0 auto; min-height: 100vh; background: var(--bg); position: relative; overflow: hidden; }
-.chat-screen { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
-.chat-screen.hidden { display: none; }
+.chat-app {
+  width: 100%; max-width: 480px; margin: 0 auto;
+  min-height: 100vh; min-height: 100dvh;
+  background: var(--bg); position: relative; overflow: hidden;
+}
+.chat-screen {
+  min-height: 100vh; min-height: 100dvh;
+  display: flex; flex-direction: column; background: var(--bg);
+}
 
 .chat-topbar {
   position: sticky; top: 0; z-index: 30;
@@ -920,7 +926,9 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 @supports (padding: max(0px)) {
   .nav { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   .app { padding-bottom: max(100px, calc(env(safe-area-inset-bottom) + 80px)); }
-  /* ═══════════════════════════════════════════
+}
+
+/* ═══════════════════════════════════════════
    FUNDER-STYLE MARKETPLACE
    ═══════════════════════════════════════════ */
 
@@ -1317,3 +1325,43 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
     max-height: 92vh;
   }
 }
+/* ── Chat polish additions ─────────────────────── */
+
+/* Skeleton loader */
+.chat-messages .skeleton { padding: 8px 14px; display: flex; flex-direction: column; gap: 12px; }
+.skeleton-row { display: flex; gap: 8px; max-width: 70%; }
+.skeleton-row.right { align-self: flex-end; }
+.skeleton-bubble {
+  height: 36px; border-radius: 16px; flex: 1;
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* Date separator */
+.msg-day {
+  align-self: center; margin: 6px auto;
+  font-size: 11.5px; font-weight: 700;
+  color: var(--text-muted); background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 3px 12px; border-radius: var(--r-full);
+}
+
+/* Optimistic send */
+.msg.sending .msg-bubble { opacity: .5; }
+
+/* Reconnect banner */
+.chat-conn-banner {
+  position: fixed; top: 0; left: 50%; transform: translate(-50%, -100%);
+  width: 100%; max-width: 480px;
+  background: var(--warning); color: #22252D;
+  padding: 8px; font-size: 12.5px; font-weight: 700;
+  text-align: center; z-index: 300;
+  transition: transform .3s ease;
+}
+.chat-conn-banner.show { transform: translate(-50%, 0); }
+
+/* Clickable links in messages */
+.msg-content a { color: inherit; text-decoration: underline; word-break: break-all; }
+.msg.mine .msg-content a { color: #22252D; }

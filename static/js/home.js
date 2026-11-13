@@ -701,7 +701,14 @@ if (actionsEl) {
     if (!action) return;
     const kind = action.dataset.action;
     if (kind === 'anonymous') return;
-    const routes = { market: '/market', assignments: '/assignments', chat: '/chat', parties: '/parties', connect: '/connect' };
+    const routes = {
+  market:      '/market',
+  assignments: '/assignments',
+  chat:        '/chat',
+  parties:     '/parties',
+  connect:     '/connect',
+  pastq:       '/past-questions',
+};
     if (routes[kind]) window.location.href = routes[kind];
   });
 }

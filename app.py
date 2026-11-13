@@ -29,7 +29,8 @@ from config import Config
 from models import (db, User, StudentVerification, Post, Like, Comment,
                     ChatRoom, ChatMember, ChatMessage,
                     Listing, Assignment, Event, EventRSVP, Connection,
-                    Follow, ProfileView, AdminAction, AdPayment)
+                    Follow, ProfileView, AdminAction, AdPayment,
+                    PastQuestion)   # ← this must be there
 # NOTE: analyze_image is imported lazily inside verify() so heavy ML
 # dependencies don't crash Railway boot.
 from sqlalchemy.orm import joinedload
@@ -1140,6 +1141,127 @@ def api_assignment_delete(aid):
     db.session.commit()
     return jsonify({'ok': True})
 
+    # ─────────────────────────────────────────────
+# PAST QUESTIONS
+# ─────────────────────────────────────────────
+ALLOWED_PQ_FILES = {'pdf', 'png', 'jpg', 'jpeg', 'webp', 'doc', 'docx'}
+
+def _allowed_pq(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_PQ_FILES
+
+
+@app.route('/past-questions')
+@verified_required
+def past_questions():
+    return render_template('past_questions.html', user=current_user())
+
+
+def serialize_pq(p, include_path=False):
+    d = {
+        'id':          p.id,
+        'course_code': p.course_code,
+        'course_title': p.course_title or '',
+        'department':  p.department or '',
+        'level':       p.level or '',
+        'semester':    p.semester or '',
+        'year':        p.year,
+        'file_name':   p.file_name or '',
+        'file_size':   p.file_size or 0,
+        'downloads':   p.downloads or 0,
+        'uploader':    p.uploader.full_name if p.uploader else 'Unknown',
+        'approved':    bool(p.approved),
+        'time':        time_ago(p.created_at),
+    }
+    if include_path:
+        d['file_path'] = p.file_path
+    return d
+
+
+@app.route('/api/past-questions', methods=['GET', 'POST'])
+@verified_required
+def api_past_questions():
+    me = current_user()
+
+    # ── POST: upload ──
+    if request.method == 'POST':
+        course_code  = (request.form.get('course_code')  or '').strip().upper()
+        course_title = (request.form.get('course_title') or '').strip()
+        department   = (request.form.get('department')   or '').strip()
+        level        = (request.form.get('level')        or '').strip()
+        semester     = (request.form.get('semester')     or '').strip()
+        year_str     = (request.form.get('year')         or '').strip()
+        file         = request.files.get('file')
+
+        errors = []
+        if not course_code: errors.append('Course code required')
+        if not level:       errors.append('Level required')
+        if not year_str or not year_str.isdigit():
+            errors.append('Valid year required')
+        if not file or not file.filename:
+            errors.append('File required')
+        elif not _allowed_pq(file.filename):
+            errors.append('File type not allowed (PDF, DOC, DOCX, PNG, JPG, WEBP)')
+
+        if errors:
+            return jsonify({'error': '; '.join(errors)}), 400
+
+        file_url = save_upload(file, f'pq{me.id}')
+        if not file_url:
+            return jsonify({'error': f'Upload failed: {_last_upload_error or "unknown"}'}), 500
+
+        pq = PastQuestion(
+            course_code=course_code, course_title=course_title,
+            department=department, level=level, semester=semester,
+            year=int(year_str), file_path=file_url,
+            file_name=file.filename, file_size=0,
+            uploader_id=me.id, approved=False,
+        )
+        db.session.add(pq)
+        db.session.commit()
+        return jsonify({'ok': True, 'pending': True,
+                        'message': 'Submitted — an admin will review it shortly.'})
+
+    # ── GET: search ──
+    q = PastQuestion.query.filter_by(approved=True)
+
+    course = (request.args.get('course') or '').strip().upper()
+    dept   = (request.args.get('department') or '').strip()
+    level  = (request.args.get('level') or '').strip()
+    year   = (request.args.get('year') or '').strip()
+
+    if course:
+        q = q.filter(PastQuestion.course_code.ilike(f'%{course}%'))
+    if dept:
+        q = q.filter(PastQuestion.department == dept)
+    if level:
+        q = q.filter(PastQuestion.level == level)
+    if year and year.isdigit():
+        q = q.filter(PastQuestion.year == int(year))
+
+    rows = q.order_by(PastQuestion.year.desc(),
+                      PastQuestion.course_code.asc()).limit(200).all()
+    return jsonify([serialize_pq(p) for p in rows])
+
+
+@app.route('/api/past-questions/<int:pqid>/download')
+@verified_required
+def api_pq_download(pqid):
+    pq = PastQuestion.query.get_or_404(pqid)
+    if not pq.approved:
+        abort(404)
+    pq.downloads = (pq.downloads or 0) + 1
+    db.session.commit()
+    return jsonify({'url': pq.file_path, 'name': pq.file_name or 'past-question'})
+
+
+@app.route('/api/past-questions/mine')
+@verified_required
+def api_pq_mine():
+    me = current_user()
+    rows = (PastQuestion.query.filter_by(uploader_id=me.id)
+            .order_by(PastQuestion.created_at.desc()).limit(50).all())
+    return jsonify([serialize_pq(p) for p in rows])
+
 # ─────────────────────────────────────────────
 # EVENTS
 # ─────────────────────────────────────────────
@@ -1969,6 +2091,59 @@ def admin_reject(vid):
     flash(f'{v.user.full_name} rejected', 'success')
     return redirect(url_for('admin'))
 
+@app.route(app.config['ADMIN_PATH'] + '/past-questions')
+def admin_past_questions():
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+
+    pending = (PastQuestion.query.filter_by(approved=False)
+               .order_by(PastQuestion.created_at.asc()).all())
+    recent  = (PastQuestion.query.filter_by(approved=True)
+               .order_by(PastQuestion.created_at.desc()).limit(30).all())
+    return render_template('admin_past_questions.html',
+                           pending=pending, recent=recent)
+
+
+@app.route(app.config['ADMIN_PATH'] + '/past-questions/<int:pqid>/approve', methods=['POST'])
+def admin_pq_approve(pqid):
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+
+    pq = PastQuestion.query.get_or_404(pqid)
+    pq.approved = True
+    pq.reject_reason = None
+    db.session.commit()
+    log_admin_action('pq_approve', target_user_id=pq.uploader_id, detail=pq.course_code)
+    flash(f'Approved {pq.course_code} ({pq.year})', 'success')
+    return redirect(url_for('admin_past_questions'))
+
+
+@app.route(app.config['ADMIN_PATH'] + '/past-questions/<int:pqid>/reject', methods=['POST'])
+def admin_pq_reject(pqid):
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+
+    pq = PastQuestion.query.get_or_404(pqid)
+    reason = (request.form.get('reason') or '').strip() or 'Rejected'
+    delete_upload(pq.file_path)
+    db.session.delete(pq)
+    db.session.commit()
+    log_admin_action('pq_reject', target_user_id=pq.uploader_id, detail=reason)
+    flash(f'Rejected {pq.course_code}', 'success')
+    return redirect(url_for('admin_past_questions'))
+
 @app.route(app.config['ADMIN_PATH'] + '/log')
 def admin_log_view():
     u = current_user()
@@ -2288,4 +2463,23 @@ if __name__ == '__main__':
     print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
-    socketio.run(app, debug=debug, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+    # ── Local dev on Windows: eventlet is unreliable, use threading ──
+    # Production (Railway) still uses eventlet because the module is
+    # constructed with async_mode='eventlet' above.
+    import platform
+    if platform.system() == 'Windows':
+        print('⚙  Windows detected — using threading backend for local dev', flush=True)
+        # Recreate the SocketIO instance with threading mode
+        from flask_socketio import SocketIO as _SIO
+        _local_sio = _SIO(app, cors_allowed_origins='*',
+                          async_mode='threading',
+                          ping_interval=25, ping_timeout=60)
+        # Rebind handlers by copying the server's registered events
+        for event in list(socketio.server.handlers.keys()):
+            for handler in socketio.server.handlers[event]:
+                _local_sio.on_event(event, handler)
+        _local_sio.run(app, debug=debug, host='0.0.0.0', port=port,
+                       allow_unsafe_werkzeug=True)
+    else:
+        socketio.run(app, debug=debug, host='0.0.0.0', port=port,
+                     allow_unsafe_werkzeug=True)

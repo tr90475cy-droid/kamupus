@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 
-<meta name="theme-color" content="#0b1220">
+<!-- ✏️ theme-color now matches Warm Graphite bg (was #0b1220) -->
+<meta name="theme-color" content="#22252D">
 <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
 
 <!-- Favicons -->
@@ -39,32 +40,39 @@
 <div id="pinHint" class="hidden" style="
      position: fixed; bottom: 20px; left: 16px; right: 16px;
      max-width: 380px; margin: 0 auto;
-     background: #111827; color: #e5e7eb;
+     background: #2A2E38; color: #E8E9ED;                        /* ✏️ was #111827 / #e5e7eb */
      padding: 14px 16px; border-radius: 12px;
+     border: 1px solid #3A3F4C;                                  /* ✏️ matches theme border */
      box-shadow: 0 6px 24px rgba(0,0,0,0.5);
      z-index: 8000; font-size: 14px; line-height: 1.45;">
   <div style="display: flex; gap: 10px; align-items: flex-start;">
     <div style="font-size: 20px;">📌</div>
     <div style="flex: 1;">
       <strong style="color:#fff;">Pin KAMUPUS to your home screen</strong>
-      <div id="pinHintText" style="color:#9ca3af; margin-top: 4px; font-size: 13px;">
+      <div id="pinHintText" style="color:#9A9FAC; margin-top: 4px; font-size: 13px;">
         Open your browser menu and choose <strong>Add to Home Screen</strong>.
       </div>
     </div>
     <button id="pinHintClose" style="
-        background: none; border: none; color: #6b7280;
+        background: none; border: none; color: #6B7280;
         font-size: 18px; cursor: pointer; padding: 0;">✕</button>
   </div>
 </div>
 
 <script>
 (function () {
+  // ✏️ Skip on chat screen — the composer sits at the bottom where this banner renders
+  if (location.pathname === '/chat' || location.pathname.startsWith('/chat/')) return;
+
   const standalone = window.matchMedia('(display-mode: standalone)').matches
                   || window.navigator.standalone === true;
-  const dismissed  = localStorage.getItem('pinHintDismissed') === '1';
 
-  if (standalone) { console.log('[pinHint] skipped: already installed'); return; }
-  if (dismissed)  { console.log('[pinHint] skipped: previously dismissed'); return; }
+  // ✏️ try/catch — localStorage throws in private mode / some webviews
+  let dismissed = false;
+  try { dismissed = localStorage.getItem('pinHintDismissed') === '1'; } catch (_) {}
+
+  if (standalone) return;
+  if (dismissed)  return;
 
   const hint  = document.getElementById('pinHint');
   const text  = document.getElementById('pinHintText');
@@ -76,16 +84,14 @@
   } else if (/android/i.test(ua)) {
     text.innerHTML = 'Open Chrome\'s <strong>⋮</strong> menu, then tap <strong>Add to Home Screen</strong>.';
   } else {
-    // Desktop test mode — comment this line out to hide on desktop
-    text.innerHTML = '<em style="color:#6b7280;">[desktop test]</em> On mobile: "Add to Home Screen".';
+    text.innerHTML = '<em style="color:#6B7280;">[desktop test]</em> On mobile: "Add to Home Screen".';
   }
 
   setTimeout(() => hint.classList.remove('hidden'), 1500);
-  console.log('[pinHint] will show in 1.5s');
 
   close.addEventListener('click', () => {
     hint.classList.add('hidden');
-    localStorage.setItem('pinHintDismissed', '1');
+    try { localStorage.setItem('pinHintDismissed', '1'); } catch (_) {}
   });
 })();
 </script>
@@ -101,6 +107,10 @@
 {% endwith %}
 
 {% block content %}{% endblock %}
+
+<!-- ✏️ Socket.IO client — MUST load before any page script that calls io() -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
 {% block scripts %}{% endblock %}
 
 </body>

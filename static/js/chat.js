@@ -3,14 +3,21 @@
 
 const socket = io({ withCredentials: true });
 
+// Reconnect banner
+const connBanner = document.createElement('div');
+connBanner.className = 'chat-conn-banner';
+connBanner.textContent = 'Reconnecting…';
+document.body.appendChild(connBanner);
+socket.on('disconnect', () => connBanner.classList.add('show'));
+socket.on('connect',    () => connBanner.classList.remove('show'));
+
 const $ = id => document.getElementById(id);
 
-// Warn early if ME_ID is missing (would break mine-detection)
 if (typeof window.ME_ID === 'undefined') {
   console.warn('[chat] window.ME_ID is not set — messages from you will render as received');
 }
 
-// ─── DOM ─────────────────────────────────────────────────────
+// DOM
 const screenRooms     = $('screenRooms');
 const screenConvo     = $('screenConvo');
 const roomListEl      = $('roomList');
@@ -37,7 +44,7 @@ const newGroupName    = $('newGroupName');
 const groupUserPicker = $('groupUserPicker');
 const startNewBtn     = $('startNewBtn');
 
-// ─── State ───────────────────────────────────────────────────
+// State
 let rooms         = [];
 let currentRoomId = null;
 let currentRoom   = null;
@@ -47,7 +54,7 @@ let peerTypingTO  = null;
 let onlineUsers   = new Set();
 let audioCtx      = null;
 
-// ─── Helpers ─────────────────────────────────────────────────
+// Helpers
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, m => (
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]
@@ -89,8 +96,24 @@ function playPing() {
     o.start(); o.stop(audioCtx.currentTime + 0.26);
   } catch (_) {}
 }
+function linkify(text) {
+  return esc(text).replace(
+    /(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+}
+function dayLabel(d) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = (today - that) / 86400000;
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7) return that.toLocaleDateString('en-US', { weekday: 'long' });
+  return that.toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
+}
 
-// ─── Room list ───────────────────────────────────────────────
+// Room list
 async function loadRooms() {
   try {
     const r = await fetch('/api/chat/rooms', { credentials: 'same-origin' });
@@ -107,30 +130,23 @@ function renderRooms() {
     roomListEl.innerHTML = '<div class="empty">No chats yet. Tap + to start one.</div>';
     return;
   }
-
-  // Rooms with unread bubble to top, otherwise keep server order (last activity desc)
   rooms.sort((a, b) => {
     if (a.unread > 0 && b.unread === 0) return -1;
     if (b.unread > 0 && a.unread === 0) return 1;
     return 0;
   });
-
   roomListEl.innerHTML = rooms.map(r => {
     const avatar = r.avatar
       ? `<img class="room-avatar" src="${esc(r.avatar)}" alt="">`
       : `<div class="room-avatar avatar-blank">${esc(initials(r.name))}</div>`;
-
     const onlineDot = (!r.is_group && r.online)
       ? '<span class="online-dot"></span>' : '';
-
     const lastLine = r.last_message
       ? `${r.last_is_mine ? 'You: ' : ''}${esc(r.last_message)}`
       : '<em style="opacity:.5;">No messages yet</em>';
-
     const unreadBadge = r.unread > 0
       ? `<span class="room-unread">${r.unread > 99 ? '99+' : r.unread}</span>`
       : '';
-
     return `
       <div class="room-item${r.unread > 0 ? ' unread' : ''}" data-id="${r.id}">
         <div style="position:relative;">${avatar}${onlineDot}</div>
@@ -151,10 +167,16 @@ roomListEl.addEventListener('click', e => {
   if (item) openRoom(parseInt(item.dataset.id, 10));
 });
 
-// ─── Open conversation ───────────────────────────────────────
+// Open conversation
 async function openRoom(roomId) {
   currentRoomId = roomId;
   currentRoom = rooms.find(r => r.id === roomId);
+
+  if (!currentRoom) {
+    await loadRooms();
+    currentRoom = rooms.find(r => r.id === roomId) || null;
+  }
+
   screenRooms.classList.add('hidden');
   screenConvo.classList.remove('hidden');
 
@@ -166,7 +188,12 @@ async function openRoom(roomId) {
     updatePresenceHeader();
   }
 
-  chatMessagesEl.innerHTML = '<div class="empty">Loading…</div>';
+  chatMessagesEl.innerHTML = `
+    <div class="skeleton">
+      <div class="skeleton-row"><div class="skeleton-bubble"></div></div>
+      <div class="skeleton-row right"><div class="skeleton-bubble"></div></div>
+      <div class="skeleton-row"><div class="skeleton-bubble" style="max-width:60%"></div></div>
+    </div>`;
   newPillEl.classList.add('hidden');
 
   if (socket.connected) {
@@ -189,7 +216,6 @@ async function openRoom(roomId) {
   }
 
   socket.emit('read', { room_id: roomId });
-
   if (currentRoom) {
     currentRoom.unread = 0;
     renderRooms();
@@ -201,26 +227,35 @@ function renderMessages(msgs) {
     chatMessagesEl.innerHTML = '<div class="empty">Say hi 👋</div>';
     return;
   }
-  chatMessagesEl.innerHTML = msgs.map(m => msgHtml(m)).join('');
+  let html = '';
+  let lastDay = '';
+  for (const m of msgs) {
+    const d = m.created_at ? new Date(m.created_at) : new Date();
+    const key = d.toDateString();
+    if (key !== lastDay) {
+      html += `<div class="msg-day">${esc(dayLabel(d))}</div>`;
+      lastDay = key;
+    }
+    html += msgHtml(m);
+  }
+  chatMessagesEl.innerHTML = html;
 }
 
-// FIX: compute `mine` from user_id when not present (socket payload has no `mine`)
 function msgHtml(m) {
   const mine = (m.mine !== undefined)
     ? m.mine
     : (m.user_id === window.ME_ID);
-
   const tick = mine
     ? `<span class="msg-tick${m.read_at ? ' read' : ''}">${m.read_at ? '✓✓' : '✓'}</span>`
     : '';
   const avatar = mine ? '' : avatarHtml(m.avatar, m.author, false);
-
+  const sending = m.pending ? ' sending' : '';
   return `
-    <div class="msg ${mine ? 'mine' : 'theirs'}" data-id="${m.id}">
+    <div class="msg ${mine ? 'mine' : 'theirs'}${sending}" data-id="${m.id}">
       ${avatar}
       <div class="msg-bubble">
         ${mine ? '' : `<div class="msg-author">${esc(m.author)}</div>`}
-        <div class="msg-content">${esc(m.content)}</div>
+        <div class="msg-content">${linkify(m.content)}</div>
         <div class="msg-meta">${esc(m.time)}${tick}</div>
       </div>
     </div>`;
@@ -229,10 +264,8 @@ function msgHtml(m) {
 function appendMessage(m) {
   const empty = chatMessagesEl.querySelector('.empty');
   if (empty) empty.remove();
-
   const atBottom = isAtBottom();
   chatMessagesEl.insertAdjacentHTML('beforeend', msgHtml(m));
-
   if (m.mine || atBottom) {
     scrollToBottom();
     newPillEl.classList.add('hidden');
@@ -246,16 +279,26 @@ newPillEl.addEventListener('click', () => {
   newPillEl.classList.add('hidden');
 });
 
-// ─── Send message ────────────────────────────────────────────
+// Send message
 function sendMessage() {
   const content = chatInputEl.value.trim();
   if (!content || !currentRoomId) return;
-
   if (!socket.connected) {
     alert('Reconnecting — try again in a moment.');
     return;
   }
-
+  const now = new Date();
+  appendMessage({
+    id: 'tmp_' + Date.now(),
+    content,
+    user_id: window.ME_ID,
+    author: 'You',
+    avatar: null,
+    mine: true,
+    time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+    read_at: null,
+    pending: true,
+  });
   socket.emit('message', { room_id: currentRoomId, content });
   chatInputEl.value = '';
   stopTyping();
@@ -269,15 +312,13 @@ chatInputEl.addEventListener('keydown', e => {
   }
 });
 
-// ─── Typing (outgoing) ───────────────────────────────────────
+// Typing (outgoing)
 chatInputEl.addEventListener('input', () => {
   if (!currentRoomId || !socket.connected) return;
-
   if (!typingActive) {
     typingActive = true;
     socket.emit('typing', { room_id: currentRoomId });
   }
-
   clearTimeout(typingTimer);
   typingTimer = setTimeout(stopTyping, 2000);
 });
@@ -290,7 +331,7 @@ function stopTyping() {
   clearTimeout(typingTimer);
 }
 
-// ─── Typing (incoming) ───────────────────────────────────────
+// Typing (incoming)
 socket.on('typing', data => {
   if (data.room_id !== currentRoomId) return;
   typingTextEl.textContent = `${data.name} is typing…`;
@@ -307,49 +348,32 @@ socket.on('stop_typing', data => {
   clearTimeout(peerTypingTO);
 });
 
-// ─── Incoming message ────────────────────────────────────────
-// FIX: server socket payload has no `mine` — compute it once at the top
+// Incoming message
 socket.on('message', m => {
   const isMine = (m.user_id === window.ME_ID);
   m.mine = isMine;
-
-  // Message for a room we're not viewing — just refresh list + ping
-  if (!isMine && m.room_id !== currentRoomId) {
-    loadRooms();
+  if (m.room_id !== currentRoomId) return;
+  if (isMine) {
+    const pending = chatMessagesEl.querySelector('.msg.sending');
+    if (pending) pending.remove();
+  } else {
     playPing();
-    return;
   }
-
-  // Ping for any incoming message (not my own echo)
+  appendMessage(m);
   if (!isMine) {
-    playPing();
+    socket.emit('read', { room_id: currentRoomId });
   }
-
-  // Update local room object
   const room = rooms.find(r => r.id === m.room_id);
   if (room) {
     room.last_message = m.content;
     room.last_time = m.time;
     room.last_is_mine = isMine;
-    if (!isMine && m.room_id !== currentRoomId) {
-      room.unread = (room.unread || 0) + 1;
-    } else if (m.room_id === currentRoomId) {
-      room.unread = 0;
-    }
+    room.unread = 0;
     renderRooms();
-  }
-
-  if (m.room_id === currentRoomId) {
-    appendMessage(m);
-    if (!isMine) {
-      socket.emit('read', { room_id: currentRoomId });
-    }
-  } else {
-    loadRooms();
   }
 });
 
-// ─── Read receipts ───────────────────────────────────────────
+// Read receipts
 socket.on('read', data => {
   if (data.room_id !== currentRoomId) return;
   chatMessagesEl.querySelectorAll('.msg.mine .msg-tick').forEach(el => {
@@ -363,38 +387,31 @@ socket.on('room_read', data => {
   if (room) { room.unread = 0; renderRooms(); }
 });
 
-// ─── Room list live updates ──────────────────────────────────
-// FIX: don't let a stale room_update overwrite current room's unread to non-zero
+// Room list live updates
 socket.on('room_update', data => {
   const room = rooms.find(r => r.id === data.room_id);
   if (!room) { loadRooms(); return; }
-
   room.last_message = data.last_message;
   room.last_time = data.last_time;
   room.last_is_mine = false;
-
   if (data.room_id === currentRoomId) {
-    // We're looking at this room — read receipts will clear it anyway
     room.unread = 0;
   } else {
     room.unread = data.unread || 0;
   }
-
   renderRooms();
-
   if (data.from_user_id !== window.ME_ID && data.room_id !== currentRoomId) {
     playPing();
   }
 });
 
-// ─── Presence ────────────────────────────────────────────────
+// Presence
 socket.on('presence', data => {
   if (data.online) {
     onlineUsers.add(data.user_id);
   } else {
     onlineUsers.delete(data.user_id);
   }
-
   if (currentRoom && !currentRoom.is_group
       && data.user_id === currentRoom.other_user_id) {
     currentRoom.online = data.online;
@@ -421,7 +438,7 @@ function updatePresenceHeader() {
     return;
   }
   if (currentRoom.online) {
-    chatSubtitleEl.innerHTML = '<span style="color:#22c55e;">● Online</span>';
+    chatSubtitleEl.innerHTML = '<span style="color:#6BCB9C;">● Online</span>';
   } else if (currentRoom.last_seen) {
     chatSubtitleEl.textContent = `Last seen ${timeAgo(currentRoom.last_seen)}`;
   } else {
@@ -438,7 +455,7 @@ function timeAgo(iso) {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-// ─── Reconnect handling ──────────────────────────────────────
+// Reconnect
 socket.on('connect', () => {
   if (currentRoomId) {
     socket.emit('join', { room_id: currentRoomId });
@@ -447,10 +464,10 @@ socket.on('connect', () => {
   loadRooms();
 });
 
-// ─── Back button ─────────────────────────────────────────────
+// Back button
 convoBackBtn.addEventListener('click', () => {
   stopTyping();
-  socket.emit('leave', { room_id: currentRoomId });
+  if (currentRoomId) socket.emit('leave', { room_id: currentRoomId });
   typingEl.classList.add('hidden');
   newPillEl.classList.add('hidden');
   currentRoomId = null;
@@ -460,7 +477,7 @@ convoBackBtn.addEventListener('click', () => {
   loadRooms();
 });
 
-// ─── Search ──────────────────────────────────────────────────
+// Search
 searchToggleBtn.addEventListener('click', () => {
   searchBar.classList.toggle('hidden');
   if (!searchBar.classList.contains('hidden')) searchInput.focus();
@@ -489,7 +506,10 @@ async function runSearch(q) {
       searchResults.innerHTML = '<div class="empty" style="padding:16px;">No users found.</div>';
     } else {
       searchResults.innerHTML = users.map(u => `
-        <div class="search-row" data-uid="${u.id}" data-name="${esc(u.name)}">
+        <div class="search-row"
+             data-uid="${u.id}"
+             data-room-id="${u.existing_room_id || ''}"
+             data-name="${esc(u.name)}">
           <div class="room-avatar avatar-blank">${esc(initials(u.name))}</div>
           <div style="flex:1;min-width:0;">
             <div style="font-weight:600;">${esc(u.name)}</div>
@@ -504,15 +524,20 @@ async function runSearch(q) {
 searchResults.addEventListener('click', async e => {
   const row = e.target.closest('.search-row');
   if (!row) return;
-  const uid = row.dataset.uid;
+  searchBar.classList.add('hidden');
+  searchInput.value = '';
+  searchResults.classList.add('hidden');
+  const existingRoomId = row.dataset.roomId;
+  if (existingRoomId) {
+    await loadRooms();
+    openRoom(parseInt(existingRoomId, 10));
+    return;
+  }
   try {
-    const r = await fetch(`/api/chat/dm/${uid}`,
+    const r = await fetch(`/api/chat/dm/${row.dataset.uid}`,
                           { method: 'POST', credentials: 'same-origin' });
     if (!r.ok) throw new Error();
     const room = await r.json();
-    searchBar.classList.add('hidden');
-    searchInput.value = '';
-    searchResults.classList.add('hidden');
     await loadRooms();
     openRoom(room.id);
   } catch (_) {
@@ -520,7 +545,7 @@ searchResults.addEventListener('click', async e => {
   }
 });
 
-// ─── New group ───────────────────────────────────────────────
+// New group
 startNewBtn.addEventListener('click', () => {
   searchBar.classList.remove('hidden');
   searchInput.focus();
@@ -569,6 +594,6 @@ newGroupCreate.addEventListener('click', async () => {
   }
 });
 
-// ─── Boot ────────────────────────────────────────────────────
+// Boot
 loadRooms();
 })();

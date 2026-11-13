@@ -256,3 +256,28 @@ class AdminAction(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     admin = db.relationship('User', foreign_keys=[admin_id])
+
+
+class PastQuestion(db.Model):
+    __tablename__ = 'past_questions'
+    id           = db.Column(db.Integer, primary_key=True)
+    course_code  = db.Column(db.String(20), nullable=False, index=True)
+    course_title = db.Column(db.String(120))
+    department   = db.Column(db.String(80), index=True)
+    level        = db.Column(db.String(10), index=True)      # '100', '200', ...
+    semester     = db.Column(db.String(10))                  # 'first', 'second'
+    year         = db.Column(db.Integer, index=True)         # 2023, 2024
+    file_path    = db.Column(db.String(500), nullable=False) # Supabase URL
+    file_name    = db.Column(db.String(200))
+    file_size    = db.Column(db.Integer)
+    uploader_id  = db.Column(db.Integer, db.ForeignKey('users.id'))
+    approved     = db.Column(db.Boolean, default=False, index=True)
+    reject_reason = db.Column(db.String(200))
+    downloads    = db.Column(db.Integer, default=0)
+    created_at   = db.Column(db.DateTime, default=datetime.utcnow)
+
+    uploader = db.relationship('User')
+
+    __table_args__ = (
+        db.Index('ix_pq_course_level_year', 'course_code', 'level', 'year'),
+    )
