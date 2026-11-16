@@ -317,7 +317,6 @@ def save_video(file, prefix, max_size_mb=50):
             folder=f'kamupus/{prefix}',
             chunk_size=6 * 1024 * 1024,
             timeout=180,
-            moderation='google_video_moderation',
             notification_url='https://kamupus.com/cloudinary/webhook',
             eager=[{'width': 400, 'height': 400, 'crop': 'fill', 'format': 'jpg'}],
             eager_async=True,
@@ -967,7 +966,7 @@ def api_video_upload():
         caption=caption, hashtags=hashtags, music='',
         duration=duration, is_draft=is_draft,
         cloudinary_id=public_id,
-        moderation_status='approved' if is_draft else 'pending',
+        moderation_status='approved'
     )
     db.session.add(v)
     db.session.flush()
