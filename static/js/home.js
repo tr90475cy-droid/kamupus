@@ -327,36 +327,145 @@ async function loadComments(postId) {
   if (!commentsList) return;
   try {
     const res = await fetch('/api/posts/' + postId + '/comments', { credentials: 'same-origin' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);   // BUG #5 fix
-    const comments = await res.json();
-    if (!Array.isArray(comments) || !comments.length) {   // BUG #5 fix
-      commentsList.innerHTML = L + 'div class="empty"' + G + 'No comments yet. Be the first!' + L + '/div' + G;
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const tree = await res.json();
+    if (!Array.isArray(tree) || !tree.length) {
+      commentsList.innerHTML = '<div class="empty">No comments yet. Be the first!</div>';
       return;
     }
-    commentsList.innerHTML = comments.map(function(c) {
-      let cAvatar;
-      if (c.anonymous) {
-        cAvatar = L + 'div class="avatar avatar-anon comment-avatar"' + G + '🥷' + L + '/div' + G;
-      } else if (c.avatar) {
-        cAvatar = L + 'img class="avatar comment-avatar" src="' + escAttr(c.avatar) + '" alt=""' + G;
-      } else {
-        cAvatar = L + 'div class="avatar avatar-blank comment-avatar"' + G + L + '/div' + G;
-      }
-      return L + 'div class="comment-item ' + (c.anonymous ? 'anon' : '') + '"' + G
-        + cAvatar
-        + L + 'div class="comment-body"' + G
-        + L + 'div class="comment-head"' + G
-        + L + 'span class="comment-author"' + G + escHtml(c.author) + L + '/span' + G
-        + L + 'span class="comment-time"' + G + escHtml(c.time) + L + '/span' + G
-        + L + '/div' + G
-        + L + 'p' + G + escHtml(c.content) + L + '/p' + G
-        + L + '/div' + G
-        + L + '/div' + G;
-    }).join('');
-    commentsList.scrollTop = commentsList.scrollHeight;
+    commentsList.innerHTML = tree.map((c) => renderComment(c, false)).join('');
+    bindCommentEvents();
+    commentsList.scrollTop = 0;
   } catch (e) {
-    if (commentsList) commentsList.innerHTML = L + 'div class="empty"' + G + 'Could not load comments.' + L + '/div' + G;
+    if (commentsList) commentsList.innerHTML = '<div class="empty">Could not load comments.</div>';
   }
+}
+
+function renderComment(c, isReply) {
+  const replies = c.replies || [];
+  const hasReplies = replies.length > 0;
+
+  let av;
+  if (c.anonymous) av = '<div class="avatar avatar-anon comment-avatar">🥷</div>';
+  else if (c.avatar) av = '<img class="avatar comment-avatar" src="' + c.avatar + '" alt="">';
+  else av = '<div class="avatar avatar-blank comment-avatar"></div>';
+
+  const repliesHtml = hasReplies
+    ? '<div class="comment-replies" id="replies-' + c.id + '">'
+        + replies.map((r) => renderComment(r, true)).join('')
+      + '</div>'
+    : '';
+
+  const replyToggle = hasReplies
+    ? '<button class="comment-replies-toggle" data-toggle-replies="' + c.id + '">'
+        + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>'
+        + 'View ' + replies.length + ' ' + (replies.length === 1 ? 'reply' : 'replies')
+      + '</button>'
+    : '';
+
+  const replyBtn = isReply ? ''
+    : '<button class="comment-reply-btn" data-reply-to="' + c.id + '">Reply</button>';
+
+  const replyForm = isReply ? ''
+    : '<div class="comment-reply-form" id="reply-form-' + c.id + '">'
+        + '<textarea placeholder="Reply to @' + c.author + '…" rows="1" data-reply-input="' + c.id + '"></textarea>'
+        + '<button class="reply-send" data-reply-send="' + c.id + '" aria-label="Send reply">'
+          + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>'
+        + '</button>'
+      + '</div>';
+
+  return '<div class="comment-item ' + (c.anonymous ? 'anon' : '') + '" data-comment-id="' + c.id + '">'
+    + av
+    + '<div class="comment-body">'
+      + '<div class="comment-head">'
+        + '<span class="comment-author">' + c.author + '</span>'
+        + '<span class="comment-time">' + c.time + '</span>'
+      + '</div>'
+      + '<p>' + c.content + '</p>'
+      + replyBtn
+      + replyForm
+      + replyToggle
+      + repliesHtml
+    + '</div>'
+  + '</div>';
+}
+
+function bindCommentEvents() {
+  commentsList.querySelectorAll('[data-toggle-replies]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const id = b.dataset.toggleReplies;
+      const box = document.getElementById('replies-' + id);
+      if (!box) return;
+      const isOpen = box.classList.toggle('open');
+      const n = box.querySelectorAll('.comment-item').length;
+      b.innerHTML = isOpen
+        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>Hide replies'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>View ' + n + ' ' + (n === 1 ? 'reply' : 'replies');
+    });
+  });
+
+  commentsList.querySelectorAll('[data-reply-to]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const id = b.dataset.replyTo;
+      const form = document.getElementById('reply-form-' + id);
+      if (!form) return;
+      commentsList.querySelectorAll('.comment-reply-form.open').forEach((f) => {
+        if (f !== form) f.classList.remove('open');
+      });
+      form.classList.toggle('open');
+      if (form.classList.contains('open')) {
+        const ta = form.querySelector('textarea');
+        if (ta) setTimeout(() => ta.focus(), 50);
+      }
+    });
+  });
+
+  commentsList.querySelectorAll('[data-reply-send]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.dataset.replySend;
+      const form = document.getElementById('reply-form-' + id);
+      const ta = form ? form.querySelector('textarea') : null;
+      const content = ta ? ta.value.trim() : '';
+      if (!content || !currentPostId) return;
+
+      b.disabled = true;
+      try {
+        const r = await fetch('/api/posts/' + currentPostId + '/comments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            content,
+            parent_id: Number(id),
+            anonymous: commentAnon && commentAnon.classList.contains('on'),
+          }),
+        });
+        if (!r.ok) throw new Error();
+
+        await loadComments(currentPostId);
+
+        const box = document.getElementById('replies-' + id);
+        if (box) {
+          box.classList.add('open');
+          const toggle = commentsList.querySelector('[data-toggle-replies="' + id + '"]');
+          if (toggle) toggle.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>Hide replies';
+        }
+
+        const card = document.querySelector('.post[data-id="' + currentPostId + '"]');
+        if (card) {
+          const el = card.querySelector('.comment-count');
+          if (el) {
+            const n = parseInt(el.textContent.replace(/[KM]/g, ''), 10) || 0;
+            el.textContent = String(n + 1);
+          }
+        }
+      } catch (_) {
+        alert('Could not post reply');
+      } finally {
+        b.disabled = false;
+      }
+    });
+  });
 }
 
 function closeComments() {

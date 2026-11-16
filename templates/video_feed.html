@@ -12,7 +12,7 @@
   position: fixed;
   inset: 0;
   height: 100vh;
-  height: 100dvh;                        /* mobile viewport fix */
+  height: 100dvh;
   overflow-y: scroll;
   scroll-snap-type: y mandatory;
   scroll-behavior: smooth;
@@ -44,13 +44,13 @@
   display: block;
 }
 
-/* ── Top header (back + title) ── */
+/* ── Top header (back + search bar) ── */
 .vf-header {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  z-index: 20;
+  z-index: 150;                          /* ← above .video-feed */
   display: flex;
   align-items: center;
   gap: 12px;
@@ -59,6 +59,7 @@
   pointer-events: none;
 }
 .vf-header > * { pointer-events: auto; }
+
 .vf-back {
   width: 36px;
   height: 36px;
@@ -70,16 +71,59 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  flex-shrink: 0;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
-.vf-title {
-  color: #fff;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+
+/* ── Search bar ── */
+.vf-search-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 999px;
+  padding: 9px 14px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  max-width: 540px;
 }
+.vf-search-wrap:focus-within {
+  background: rgba(0, 0, 0, 0.65);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.vf-search-wrap svg {
+  color: rgba(255, 255, 255, 0.75);
+  flex-shrink: 0;
+}
+.vf-search-wrap input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+  min-width: 0;
+}
+.vf-search-wrap input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+.vf-search-clear {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background 0.15s;
+}
+.vf-search-clear:hover { background: rgba(255, 255, 255, 0.15); }
 
 /* ── Overlay (author + caption) ── */
 .video-overlay {
@@ -161,6 +205,21 @@
   width: 14px;
   height: 14px;
 }
+.video-tagged {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  margin-top: 4px;
+}
+.video-tagged .tagged-user {
+  color: #a5b4fc;
+  text-decoration: none;
+  font-weight: 500;
+}
+.video-tagged .tagged-user:hover { text-decoration: underline; }
 
 /* ── Right-side action rail ── */
 .video-actions {
@@ -204,22 +263,94 @@
 .v-act.reposted svg { color: #22c55e; }
 
 /* ── Upload button (top-right) ── */
+/* ── Upload button (small, bottom-right) ── */
 .vf-upload {
   position: fixed;
-  top: calc(14px + env(safe-area-inset-top, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));   /* was top: 14px */
   right: 16px;
-  z-index: 21;
-  width: 42px;
-  height: 42px;
+  z-index: 160;
+  width: 36px;                                             /* was 42px */
+  height: 36px;                                            /* was 42px */
   border-radius: 50%;
-  background: rgba(254, 44, 85, 0.95);
+  background: #fe2c55;
   border: none;
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(254,44,85,0.45);
+  box-shadow: 0 4px 14px rgba(254, 44, 85, 0.45);
+  transition: transform 0.1s;
+}
+.vf-upload:active { transform: scale(0.92); }
+
+/* ── Mute button (small, bottom-right, next to upload) ── */
+.vf-mute {
+  position: fixed;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  right: 60px;                                             /* sits left of upload */
+  z-index: 160;
+  width: 36px;                                             /* was 42px */
+  height: 36px;                                            /* was 42px */
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: transform 0.1s;
+}
+.vf-mute:active { transform: scale(0.92); }
+
+/* ── Trending pills ── */
+.vf-trending-pills {
+  position: fixed;
+  top: calc(72px + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  z-index: 145;                          /* ← above .video-feed */
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 68px 8px 16px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  pointer-events: none;
+}
+.vf-trending-pills::-webkit-scrollbar { display: none; }
+.vf-trending-pills > * { pointer-events: auto; }
+.vf-trending-pills.hidden { display: none; }
+
+.vf-pill {
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.vf-pill:hover {
+  background: rgba(0, 0, 0, 0.75);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.vf-pill .pill-count {
+  font-size: 11px;
+  opacity: 0.7;
+  font-weight: 500;
 }
 
 /* ── Empty / loading states ── */
@@ -259,17 +390,13 @@
 }
 
 /* ═══════════════════════════════════════════════════════
-   COMMENTS BOTTOM SHEET — KAMUPUS STYLE
-   Matches home.html modal aesthetic + TikTok slide-up UX
-   ═══════════════════════════════════════════════════════ */
-/* ═══════════════════════════════════════════════════════
-   COMMENTS — RIGHT-SIDE PANEL (TikTok desktop style)
+   COMMENTS — RIGHT-SIDE PANEL (pure white + black text)
    ═══════════════════════════════════════════════════════ */
 .comments-modal {
   position: fixed;
   inset: 0;
   z-index: 1200;
-  background: rgba(10, 10, 20, 0);
+  background: rgba(0, 0, 0, 0);
   pointer-events: none;
   display: flex;
   align-items: stretch;
@@ -277,7 +404,7 @@
   transition: background 0.28s ease;
 }
 .comments-modal.open {
-  background: rgba(10, 10, 20, 0.55);
+  background: rgba(0, 0, 0, 0.5);        /* ← pure black backdrop, no blue tint */
   pointer-events: auto;
 }
 
@@ -297,17 +424,12 @@
   will-change: transform;
   touch-action: pan-y;
 }
-.comments-modal.open .comments-sheet {
-  transform: translateX(0);
-}
+.comments-modal.open .comments-sheet { transform: translateX(0); }
 
 @media (min-width: 720px) {
-  .comments-sheet {
-    border-radius: 16px 0 0 16px;
-  }
+  .comments-sheet { border-radius: 16px 0 0 16px; }
 }
 
-/* ── Header ── */
 .comments-header {
   display: flex;
   align-items: center;
@@ -316,6 +438,7 @@
   padding-top: calc(16px + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid #f0f0f0;
   flex-shrink: 0;
+  background: #ffffff;
 }
 .comments-header-title {
   font-size: 15px;
@@ -341,7 +464,6 @@
 .comments-close:hover  { background: #e8e8eb; }
 .comments-close:active { transform: scale(0.92); }
 
-/* ── List ── */
 .comments-list {
   flex: 1;
   overflow-y: auto;
@@ -363,7 +485,6 @@
   line-height: 1.5;
 }
 
-/* ── Comment item ── */
 .comment-item {
   display: flex;
   gap: 12px;
@@ -422,7 +543,6 @@
   white-space: pre-wrap;
 }
 
-/* ── Input row ── */
 .comment-input-row {
   display: flex;
   align-items: flex-end;
@@ -478,7 +598,7 @@
 
 .comment-send-btn {
   border: none;
-  background: var(--brand, var(--primary, #0a0a0a));
+  background: #0a0a0a;                   /* ← hardcoded black, no brand override */
   color: #ffffff;
   border-radius: 50%;
   width: 40px;
@@ -497,124 +617,6 @@
   cursor: not-allowed;
   transform: none;
 }
-
-/* ── Search bar + trending pills ── */
-.vf-search-wrap {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 999px;
-  padding: 9px 14px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  max-width: 540px;
-}
-.vf-search-wrap:focus-within {
-  background: rgba(0, 0, 0, 0.65);
-  border-color: rgba(255, 255, 255, 0.35);
-}
-.vf-search-wrap svg {
-  color: rgba(255, 255, 255, 0.75);
-  flex-shrink: 0;
-}
-.vf-search-wrap input {
-  flex: 1;
-  background: none;
-  border: none;
-  color: #fff;
-  font-size: 14px;
-  outline: none;
-  font-family: inherit;
-  min-width: 0;
-}
-.vf-search-wrap input::placeholder {
-  color: rgba(255, 255, 255, 0.55);
-}
-.vf-search-clear {
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.75);
-  cursor: pointer;
-  padding: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  transition: background 0.15s;
-}
-.vf-search-clear:hover { background: rgba(255, 255, 255, 0.15); }
-
-/* Trending pills */
-.vf-trending-pills {
-  position: fixed;
-  top: calc(72px + env(safe-area-inset-top, 0px));
-  left: 0;
-  right: 0;
-  z-index: 19;
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 8px 68px 8px 16px;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-  pointer-events: none;
-}
-.vf-trending-pills::-webkit-scrollbar { display: none; }
-.vf-trending-pills > * { pointer-events: auto; }
-.vf-trending-pills.hidden { display: none; }
-
-.vf-pill {
-  flex-shrink: 0;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transition: background 0.15s, border-color 0.15s;
-}
-.vf-pill:hover {
-  background: rgba(0, 0, 0, 0.75);
-  border-color: rgba(255, 255, 255, 0.35);
-}
-.vf-pill .pill-count {
-  font-size: 11px;
-  opacity: 0.7;
-  font-weight: 500;
-}
-
-/* Mute button — reposition to below search */
-.vf-mute {
-  position: fixed;
-  top: calc(72px + env(safe-area-inset-top, 0px));
-  right: 16px;
-  z-index: 21;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  border: none;
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: transform 0.1s;
-}
-.vf-mute:active { transform: scale(0.92); }
 
 /* ── Upload composer ── */
 .upload-modal {
@@ -738,14 +740,14 @@
   font-size: 14px;
   font-family: inherit;
   outline: none;
-  background: #dbdddf;
+  background: #f7f7f8;
+  color: #0a0a0a;
   resize: vertical;
 }
 .upload-field textarea:focus,
 .upload-field input:focus {
-  border-color: #0e0f10;
+  border-color: #0a0a0a;
   background: #fff;
-  color: #000;
 }
 
 .upload-chips {
@@ -822,24 +824,82 @@
   font-size: 13px;
 }
 
-.video-tagged {
+/* ── Mobile tweaks ── */
+@media (max-width: 480px) {
+  .comments-sheet {
+    max-width: 100%;
+  }
+  .comment-anon-btn,
+  .comment-send-btn {
+    width: 38px;
+    height: 38px;
+  }
+  .vf-search-wrap {
+    max-width: none;
+  }
+}
+
+/* ── Upload preview stage (9:16 vertical, tall, clear) ── */
+.upload-stage {
+  position: relative;
+  width: 100%;
+  max-width: 240px;
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  margin: 0 auto 10px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
   align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+.upload-stage video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+}
+.upload-stage.has-video video { display: block; }
+.upload-stage.has-video .upload-empty-btn { display: none; }
+
+.upload-empty-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.9);
-  margin-top: 4px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
 }
-.video-tagged .tagged-user {
-  color: #a5b4fc;
-  text-decoration: none;
-  font-weight: 500;
+.upload-empty-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.04);
 }
-.video-tagged .tagged-user:hover { text-decoration: underline; }
+.upload-empty-btn svg { opacity: 0.9; }
+
+.upload-change {
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #111;
+  padding: 8px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.upload-change:hover { background: #f3f4f6; border-color: #d1d5db; }
 </style>
 
-<!-- ═══════════ FIXED HEADER ═══════════ -->
+<!-- ═══════════ HEADER + SEARCH ═══════════ -->
 <div class="vf-header">
   <button class="vf-back" onclick="history.length > 1 ? history.back() : (location.href='/home')" aria-label="Back">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -872,6 +932,20 @@
   </svg>
 </button>
 
+<!-- ═══════════ SOUND TOGGLE ═══════════ -->
+<button class="vf-mute" id="vfMute" aria-label="Toggle sound">
+  <svg id="vfMuteIconOff" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+    <line x1="23" y1="9" x2="17" y2="15"/>
+    <line x1="17" y1="9" x2="23" y2="15"/>
+  </svg>
+  <svg id="vfMuteIconOn" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+  </svg>
+</button>
+
 <!-- ═══════════ FEED ═══════════ -->
 <div class="video-feed" id="videoFeed">
   <div class="vf-empty">
@@ -891,21 +965,28 @@
 
     <div class="upload-body">
 
-      <!-- Video preview -->
-      <div class="upload-preview">
-        <video id="uploadPreviewVideo" controls playsinline
-               style="background:#000; border-radius:12px; max-height:340px;"></video>
-        <button class="upload-change" id="uploadChange">Change video</button>
-      </div>
+    <div class="upload-preview">
+  <div class="upload-stage" id="uploadStage">
+    <video id="uploadPreviewVideo" controls playsinline preload="metadata"></video>
+    <button class="upload-empty-btn" id="uploadChoose" type="button">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m22 8-6 4 6 4V8Z"/>
+        <rect x="2" y="6" width="14" height="12" rx="2"/>
+      </svg>
+      <span>Choose a video</span>
+    </button>
+  </div>
+  <button class="upload-change" id="uploadChange" type="button" style="display:none;">
+    Change video
+  </button>
+</div>
 
-      <!-- Caption -->
       <div class="upload-field">
         <label>Caption</label>
         <textarea id="uploadCaption" rows="3"
                   placeholder="What's this video about?"></textarea>
       </div>
 
-      <!-- Hashtags -->
       <div class="upload-field">
         <label>Hashtags</label>
         <div class="upload-chips" id="uploadHashtagChips"></div>
@@ -915,7 +996,6 @@
         </div>
       </div>
 
-      <!-- Tag people -->
       <div class="upload-field">
         <label>Tag people</label>
         <div class="upload-chips" id="uploadTagChips"></div>
@@ -970,7 +1050,6 @@
     });
   }
 
-  // If arrived via /videos?compose=1, trigger the upload flow
   const params = new URLSearchParams(window.location.search);
   if (params.get('compose') === '1' && typeof window.openVideoUpload === 'function') {
     setTimeout(() => window.openVideoUpload(), 300);

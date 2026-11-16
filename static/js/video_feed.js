@@ -25,6 +25,11 @@ const uploadTagResults   = document.getElementById('uploadTagResults');
 const vfSearchInput  = document.getElementById('vfSearchInput');
 const vfSearchClear  = document.getElementById('vfSearchClear');
 const vfTrendingPills = document.getElementById('vfTrendingPills');
+const vfMute        = document.getElementById('vfMute');
+const vfMuteIconOff = document.getElementById('vfMuteIconOff');
+const vfMuteIconOn  = document.getElementById('vfMuteIconOn');
+const uploadStage = document.getElementById('uploadStage');
+const uploadChoose = document.getElementById('uploadChoose');
 
 // ─── State ───
 let currentVideoId = null;
@@ -40,6 +45,8 @@ let uploadHashtags  = [];
 let uploadTags      = [];   // [{id, name, avatar}]
 let uploadInFlight  = false;
 let tagSearchTimer  = null;
+
+let isMuted = (localStorage.getItem('vfMuted') !== '0');  // default muted
 
 // ═══════════════════════════════════════════════════════
 // UTIL
@@ -121,6 +128,34 @@ if (vfTrendingPills) {
     vfSearchInput.value = '#' + tag;
     vfSearchInput.dispatchEvent(new Event('input'));
   });
+}
+
+function updateMuteIcon() {
+  if (!vfMuteIconOff || !vfMuteIconOn) return;
+  vfMuteIconOff.style.display = isMuted ? '' : 'none';
+  vfMuteIconOn.style.display  = isMuted ? 'none' : '';
+}
+
+function applyMuteToAllVideos() {
+  if (!feedEl) return;
+  feedEl.querySelectorAll('video').forEach((v) => {
+    const r = v.getBoundingClientRect();
+    const visible = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+    if (visible / window.innerHeight > 0.5) {
+      v.muted = isMuted;
+      if (!isMuted && v.paused) v.play().catch(() => {});
+    }
+  });
+}
+
+if (vfMute) {
+  vfMute.addEventListener('click', () => {
+    isMuted = !isMuted;
+    localStorage.setItem('vfMuted', isMuted ? '1' : '0');
+    updateMuteIcon();
+    applyMuteToAllVideos();
+  });
+  updateMuteIcon();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -294,7 +329,7 @@ function attachObservers() {
       const card = vid.closest('.video-card');
       if (!card) return;
       if (entry.isIntersecting) {
-        vid.muted = false;
+        vid.muted = ismuted;
         vid.play().catch(() => { vid.muted = true; vid.play().catch(() => {}); });
         registerView(card, vid);
       } else {
@@ -555,6 +590,41 @@ if (commentInput) {
 window.openVideoUpload = function () {
   if (uploadInFlight) return;
 
+  // 1. Open composer FIRST with empty state
+  resetComposer();
+  uploadModal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  // 2. Auto-trigger file picker on top of the sheet
+  setTimeout(() => pickVideoFile(), 220);
+};
+
+function resetComposer() {
+  pendingFile = null;
+  if (pendingUrl) {
+    URL.revokeObjectURL(pendingUrl);
+    pendingUrl = null;
+  }
+  uploadVideo.removeAttribute('src');
+  uploadVideo.load();
+
+  if (uploadStage) uploadStage.classList.remove('has-video');
+  // ← removed: uploadChange.style.display = 'none';
+
+  uploadPostBtn.textContent = 'Post';
+  uploadPostBtn.disabled = true;
+
+  uploadCaption.value = '';
+  uploadHashtagInput.value = '';
+  uploadTagInput.value = '';
+  uploadTagResults.innerHTML = '';
+  uploadHashtags = [];
+  uploadTags = [];
+  renderHashtagChips();
+  renderTagChips();
+}
+
+function pickVideoFile() {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'video/*';
@@ -563,7 +633,8 @@ window.openVideoUpload = function () {
     if (!file) return;
 
     if (file.size > 50 * 1024 * 1024) {
-      alert('Video must be 50 MB or smaller. Yours is ' + (file.size / 1024 / 1024).toFixed(1) + ' MB.');
+      alert('Video must be 50 MB or smaller. Yours is '
+        + (file.size / 1024 / 1024).toFixed(1) + ' MB.');
       return;
     }
     const ext = (file.name.split('.').pop() || '').toLowerCase();
@@ -575,30 +646,24 @@ window.openVideoUpload = function () {
     if (pendingUrl) URL.revokeObjectURL(pendingUrl);
     pendingFile = file;
     pendingUrl = URL.createObjectURL(file);
-    openUploadSheet();
+
+    uploadVideo.src = pendingUrl;
+    uploadVideo.load();
+
+    // Show video, hide empty state
+    if (uploadStage) uploadStage.classList.add('has-video');
+    if (uploadChange) uploadChange.style.display = 'inline-block';
+
+    uploadPostBtn.disabled = false;
   };
   input.click();
-};
-
-function openUploadSheet() {
-  if (!uploadModal) return;
-
-  uploadVideo.src = pendingUrl;
-  uploadCaption.value = '';
-  uploadHashtagInput.value = '';
-  uploadTagInput.value = '';
-  uploadTagResults.innerHTML = '';
-  uploadHashtags = [];
-  uploadTags = [];
-  renderHashtagChips();
-  renderTagChips();
-  uploadPostBtn.textContent = 'Post';
-  uploadPostBtn.disabled = false;
-
-  uploadModal.classList.add('open');
-  document.body.style.overflow = 'hidden';
 }
 
+// Choose / Change buttons
+if (uploadChoose) uploadChoose.addEventListener('click', pickVideoFile);
+if (uploadChange) uploadChange.addEventListener('click', pickVideoFile);
+
+// Close
 function closeUploadSheet() {
   uploadModal.classList.remove('open');
   document.body.style.overflow = '';
@@ -609,28 +674,6 @@ function closeUploadSheet() {
   pendingFile = null;
   uploadVideo.removeAttribute('src');
   uploadVideo.load();
-}
-
-// Change video → re-pick without losing what you typed
-if (uploadChange) {
-  uploadChange.addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'video/*';
-    input.onchange = () => {
-      const file = input.files && input.files[0];
-      if (!file) return;
-      if (file.size > 50 * 1024 * 1024) { alert('Video must be 50 MB or smaller'); return; }
-      const ext = (file.name.split('.').pop() || '').toLowerCase();
-      if (!['mp4', 'mov', 'avi', 'webm', 'mkv'].includes(ext)) { alert('Unsupported format'); return; }
-      if (pendingUrl) URL.revokeObjectURL(pendingUrl);
-      pendingFile = file;
-      pendingUrl = URL.createObjectURL(file);
-      uploadVideo.src = pendingUrl;
-      uploadVideo.load();
-    };
-    input.click();
-  });
 }
 
 if (uploadClose) {
@@ -736,10 +779,10 @@ async function searchTagUsers(q) {
         uploadTagResults.innerHTML = '';
       });
     });
-  } catch (_) { /* ignore */ }
+  } catch (_) {}
 }
 
-// ── Post button ──
+// ── Post ──
 if (uploadPostBtn) {
   uploadPostBtn.addEventListener('click', async () => {
     if (uploadInFlight || !pendingFile) return;
@@ -754,7 +797,7 @@ if (uploadPostBtn) {
     fd.append('draft', 'false');
 
     try {
-      const result = await uploadWithProgress(fd, (pct) => {
+      await uploadWithProgress(fd, (pct) => {
         uploadPostBtn.textContent = 'Uploading ' + pct + '%';
       });
 
@@ -764,8 +807,7 @@ if (uploadPostBtn) {
         closeUploadSheet();
         uploadInFlight = false;
         loadFeed();
-      }, 800);
-
+      }, 700);
     } catch (err) {
       alert('Upload failed: ' + err.message);
       uploadPostBtn.textContent = 'Post';
@@ -808,11 +850,5 @@ function uploadWithProgress(formData, onProgress) {
     setTimeout(() => window.openVideoUpload(), 400);
   }
 })();
-
-// ═══════════════════════════════════════════════════════
-// INIT
-// ═══════════════════════════════════════════════════════
-loadFeed();
-loadTrendingPills();
 
 })();
