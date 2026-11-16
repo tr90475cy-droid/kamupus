@@ -258,122 +258,363 @@
   cursor: pointer;
 }
 
-/* ── Comments bottom sheet (same as home) ── */
+/* ═══════════════════════════════════════════════════════
+   COMMENTS BOTTOM SHEET — KAMUPUS STYLE
+   Matches home.html modal aesthetic + TikTok slide-up UX
+   ═══════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════
+   COMMENTS — RIGHT-SIDE PANEL (TikTok desktop style)
+   ═══════════════════════════════════════════════════════ */
 .comments-modal {
   position: fixed;
   inset: 0;
-  z-index: 1000;
-  background: rgba(0, 0, 0, 0);
+  z-index: 1200;
+  background: rgba(10, 10, 20, 0);
   pointer-events: none;
-  transition: background 0.3s ease;
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-end;
+  transition: background 0.28s ease;
 }
 .comments-modal.open {
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(10, 10, 20, 0.55);
   pointer-events: auto;
 }
+
 .comments-sheet {
   position: relative;
   width: 100%;
-  max-width: 560px;
-  background: #fff;
-  border-radius: 20px 20px 0 0;
-  max-height: 82vh;
-  min-height: 55vh;
+  max-width: 480px;
+  height: 100vh;
+  height: 100dvh;
+  background: #ffffff;
+  border-radius: 0;
   display: flex;
   flex-direction: column;
-  transform: translateY(100%);
-  transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.18);
+  transform: translateX(100%);
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.22);
   will-change: transform;
   touch-action: pan-y;
 }
-.comments-modal.open .comments-sheet { transform: translateY(0); }
-.comments-drag {
-  width: 40px; height: 4px;
-  background: #d1d5db;
-  border-radius: 2px;
-  margin: 10px auto 6px;
-  flex-shrink: 0;
+.comments-modal.open .comments-sheet {
+  transform: translateX(0);
 }
+
+@media (min-width: 720px) {
+  .comments-sheet {
+    border-radius: 16px 0 0 16px;
+  }
+}
+
+/* ── Header ── */
 .comments-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 16px 12px;
+  padding: 16px 16px 14px;
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid #f0f0f0;
   flex-shrink: 0;
 }
 .comments-header-title {
-  font-size: 15px; font-weight: 600; color: #111;
+  font-size: 15px;
+  font-weight: 700;
+  color: #0a0a0a;
+  letter-spacing: -0.01em;
 }
 .comments-close {
-  background: none; border: none; padding: 6px;
-  cursor: pointer; color: #666; font-size: 18px;
-  width: 32px; height: 32px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
+  background: #f5f5f7;
+  border: none;
+  color: #666;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  transition: background 0.15s, transform 0.1s;
 }
+.comments-close:hover  { background: #e8e8eb; }
+.comments-close:active { transform: scale(0.92); }
+
+/* ── List ── */
 .comments-list {
-  flex: 1; overflow-y: auto;
-  padding: 8px 16px;
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px 16px;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  background: #ffffff;
+}
+.comments-list::-webkit-scrollbar { width: 4px; }
+.comments-list::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 2px;
 }
 .comments-list .empty {
-  text-align: center; padding: 48px 20px;
-  color: #999; font-size: 14px;
+  text-align: center;
+  padding: 56px 20px;
+  color: #9ca3af;
+  font-size: 14px;
+  line-height: 1.5;
 }
+
+/* ── Comment item ── */
 .comment-item {
-  display: flex; gap: 10px; padding: 10px 0; align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  align-items: flex-start;
 }
-.comment-item + .comment-item { border-top: 1px solid #f5f5f5; }
+.comment-item + .comment-item { border-top: 1px solid #f3f4f6; }
+
 .comment-item .comment-avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  flex-shrink: 0; object-fit: cover;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 18px; background: #e5e7eb;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: #eef0f3;
+  color: #6b7280;
 }
-.comment-body { flex: 1; min-width: 0; }
+.comment-item.anon .comment-avatar { background: #f3f4f6; }
+
+.comment-body {
+  flex: 1;
+  min-width: 0;
+  padding-top: 2px;
+}
 .comment-head {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
 }
 .comment-author {
-  font-size: 13px; font-weight: 600; color: #111;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0a0a0a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
 }
-.comment-time { font-size: 11px; color: #999; flex-shrink: 0; }
+.comment-time {
+  font-size: 11px;
+  color: #9ca3af;
+  flex-shrink: 0;
+  font-weight: 500;
+}
 .comment-body p {
-  font-size: 14px; color: #222; line-height: 1.45;
-  margin: 0; word-wrap: break-word; white-space: pre-wrap;
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.5;
+  margin: 0;
+  word-wrap: break-word;
+  white-space: pre-wrap;
 }
+
+/* ── Input row ── */
 .comment-input-row {
-  display: flex; align-items: flex-end; gap: 8px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid #f0f0f0; background: #fff; flex-shrink: 0;
+  border-top: 1px solid #f0f0f0;
+  background: #ffffff;
+  flex-shrink: 0;
 }
+
 .comment-anon-btn {
-  border: none; background: #f0f0f0; border-radius: 50%;
-  width: 38px; height: 38px;
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; flex-shrink: 0; font-size: 18px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 18px;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
 }
-.comment-anon-btn.on { background: #fef3c7; }
+.comment-anon-btn:hover  { background: #f3f4f6; }
+.comment-anon-btn:active { transform: scale(0.94); }
+.comment-anon-btn.on {
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+
 .comment-input-row textarea {
-  flex: 1; border: 1px solid #e5e7eb; border-radius: 20px;
-  padding: 10px 14px; font-size: 14px; font-family: inherit;
-  outline: none; max-height: 100px; min-height: 38px;
-  background: #f7f7f8; resize: none; line-height: 1.3;
+  flex: 1;
+  border: 1px solid #e5e7eb;
+  border-radius: 20px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  max-height: 100px;
+  min-height: 40px;
+  background: #f7f7f8;
+  transition: border-color 0.15s, background 0.15s;
+  line-height: 1.35;
+  resize: none;
+  color: #0a0a0a;
 }
-.comment-input-row textarea:focus { border-color: #d1d5db; background: #fff; }
+.comment-input-row textarea::placeholder { color: #9ca3af; }
+.comment-input-row textarea:focus {
+  border-color: #0a0a0a;
+  background: #ffffff;
+}
+
 .comment-send-btn {
-  border: none; background: #fe2c55; color: #fff;
-  border-radius: 50%; width: 38px; height: 38px;
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; flex-shrink: 0;
+  border: none;
+  background: var(--brand, var(--primary, #0a0a0a));
+  color: #ffffff;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 0.15s, transform 0.1s;
 }
-.comment-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.comment-send-btn:hover  { opacity: 0.88; }
+.comment-send-btn:active { transform: scale(0.94); }
+.comment-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Search bar + trending pills ── */
+.vf-search-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 999px;
+  padding: 9px 14px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  max-width: 540px;
+}
+.vf-search-wrap:focus-within {
+  background: rgba(0, 0, 0, 0.65);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.vf-search-wrap svg {
+  color: rgba(255, 255, 255, 0.75);
+  flex-shrink: 0;
+}
+.vf-search-wrap input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+  min-width: 0;
+}
+.vf-search-wrap input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+.vf-search-clear {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background 0.15s;
+}
+.vf-search-clear:hover { background: rgba(255, 255, 255, 0.15); }
+
+/* Trending pills */
+.vf-trending-pills {
+  position: fixed;
+  top: calc(72px + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  z-index: 19;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 68px 8px 16px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  pointer-events: none;
+}
+.vf-trending-pills::-webkit-scrollbar { display: none; }
+.vf-trending-pills > * { pointer-events: auto; }
+.vf-trending-pills.hidden { display: none; }
+
+.vf-pill {
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.vf-pill:hover {
+  background: rgba(0, 0, 0, 0.75);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.vf-pill .pill-count {
+  font-size: 11px;
+  opacity: 0.7;
+  font-weight: 500;
+}
+
+/* Mute button — reposition to below search */
+.vf-mute {
+  position: fixed;
+  top: calc(72px + env(safe-area-inset-top, 0px));
+  right: 16px;
+  z-index: 21;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: transform 0.1s;
+}
+.vf-mute:active { transform: scale(0.92); }
 
 /* ── Upload composer ── */
 .upload-modal {
@@ -605,8 +846,23 @@
       <polyline points="15 18 9 12 15 6"/>
     </svg>
   </button>
-  <div class="vf-title">Videos</div>
+  <div class="vf-search-wrap">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/>
+      <path d="m21 21-4.3-4.3"/>
+    </svg>
+    <input type="text" id="vfSearchInput" placeholder="Search videos, people, hashtags…" autocomplete="off">
+    <button class="vf-search-clear" id="vfSearchClear" aria-label="Clear search" style="display:none;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
 </div>
+
+<!-- ═══════════ TRENDING HASHTAG PILLS ═══════════ -->
+<div class="vf-trending-pills" id="vfTrendingPills"></div>
 
 <!-- ═══════════ UPLOAD BUTTON ═══════════ -->
 <button class="vf-upload" id="vfUpload" aria-label="Upload video">
@@ -670,6 +926,31 @@
         <div class="upload-tag-results" id="uploadTagResults"></div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ COMMENTS — RIGHT-SIDE PANEL ═══════════ -->
+<div class="comments-modal" id="commentsModal">
+  <div class="comments-sheet">
+    <div class="comments-header">
+      <div class="comments-header-title">Comments</div>
+      <button class="comments-close" id="commentsClose" aria-label="Close">✕</button>
+    </div>
+
+    <div class="comments-list" id="commentsList">
+      <div class="empty">Loading…</div>
+    </div>
+
+    <div class="comment-input-row">
+      <button class="comment-anon-btn" id="commentAnon" aria-label="Comment anonymously">🥷</button>
+      <textarea id="commentInput" placeholder="Add a comment…" rows="1"></textarea>
+      <button class="comment-send-btn" id="commentSend" aria-label="Send">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
     </div>
   </div>
 </div>

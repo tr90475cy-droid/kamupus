@@ -22,11 +22,17 @@ const uploadHashtagChips = document.getElementById('uploadHashtagChips');
 const uploadTagInput     = document.getElementById('uploadTagInput');
 const uploadTagChips     = document.getElementById('uploadTagChips');
 const uploadTagResults   = document.getElementById('uploadTagResults');
+const vfSearchInput  = document.getElementById('vfSearchInput');
+const vfSearchClear  = document.getElementById('vfSearchClear');
+const vfTrendingPills = document.getElementById('vfTrendingPills');
 
 // ─── State ───
 let currentVideoId = null;
 let viewedSet      = new Set();
 let feedObserver   = null;
+
+let searchQuery    = '';
+let searchDebounce = null;
 
 let pendingFile     = null;
 let pendingUrl      = null;
@@ -51,13 +57,84 @@ function fmtCount(n) {
 }
 
 // ═══════════════════════════════════════════════════════
+// SEARCH
+// ═══════════════════════════════════════════════════════
+if (vfSearchInput) {
+  vfSearchInput.addEventListener('input', () => {
+    const raw = vfSearchInput.value.trim();
+    if (vfSearchClear) vfSearchClear.style.display = raw ? '' : 'none';
+    if (vfTrendingPills) vfTrendingPills.classList.toggle('hidden', !!raw);
+
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      searchQuery = raw.replace(/^#+/, '');
+      loadFeed();
+    }, 300);
+  });
+
+  vfSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      vfSearchInput.value = '';
+      vfSearchInput.dispatchEvent(new Event('input'));
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      vfSearchInput.blur();
+    }
+  });
+}
+
+if (vfSearchClear) {
+  vfSearchClear.addEventListener('click', () => {
+    if (!vfSearchInput) return;
+    vfSearchInput.value = '';
+    vfSearchInput.dispatchEvent(new Event('input'));
+    vfSearchInput.focus();
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// TRENDING HASHTAG PILLS
+// ═══════════════════════════════════════════════════════
+async function loadTrendingPills() {
+  if (!vfTrendingPills) return;
+  try {
+    const res = await fetch('/api/videos/trending-hashtags', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const pills = await res.json();
+    if (!Array.isArray(pills) || !pills.length) return;
+    vfTrendingPills.innerHTML = pills.map((p) =>
+      L + 'button class="vf-pill" data-tag="' + escHtml(p.tag) + '"' + G
+        + '#' + escHtml(p.tag)
+        + L + 'span class="pill-count"' + G + p.count + L + '/span' + G
+      + L + '/button' + G
+    ).join('');
+  } catch (_) { /* silent */ }
+}
+
+if (vfTrendingPills) {
+  vfTrendingPills.addEventListener('click', (e) => {
+    const pill = e.target.closest('.vf-pill');
+    if (!pill) return;
+    const tag = pill.dataset.tag;
+    if (!tag || !vfSearchInput) return;
+    vfSearchInput.value = '#' + tag;
+    vfSearchInput.dispatchEvent(new Event('input'));
+  });
+}
+
+// ═══════════════════════════════════════════════════════
 // LOAD FEED
 // ═══════════════════════════════════════════════════════
 async function loadFeed() {
   if (!feedEl) return;
   feedEl.innerHTML = L + 'div class="empty"' + G + 'Loading videos…' + L + '/div' + G;
+
   try {
-    const res = await fetch('/api/videos', { credentials: 'same-origin' });
+    const url = searchQuery
+      ? '/api/videos?q=' + encodeURIComponent(searchQuery)
+      : '/api/videos';
+    const res = await fetch(url, { credentials: 'same-origin' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     renderFeed(await res.json());
   } catch (err) {
@@ -69,13 +146,22 @@ async function loadFeed() {
 function renderFeed(videos) {
   if (!feedEl) return;
   if (!videos || !videos.length) {
-    feedEl.innerHTML =
-      L + 'div class="vf-empty"' + G
-        + L + 'div class="icon"' + G + '🎬' + L + '/div' + G
-        + L + 'h2' + G + 'No videos yet' + L + '/h2' + G
-        + L + 'p' + G + 'Be the first to post a video on campus!' + L + '/p' + G
-        + L + 'button class="vf-empty-btn" onclick="window.openVideoUpload()"' + G + 'Upload a video' + L + '/button' + G
-      + L + '/div' + G;
+    if (searchQuery) {
+      feedEl.innerHTML =
+        L + 'div class="vf-empty"' + G
+          + L + 'div class="icon"' + G + '🔍' + L + '/div' + G
+          + L + 'h2' + G + 'No results for "' + escHtml(searchQuery) + '"' + L + '/h2' + G
+          + L + 'p' + G + 'Try a different search or clear the bar above' + L + '/p' + G
+        + L + '/div' + G;
+    } else {
+      feedEl.innerHTML =
+        L + 'div class="vf-empty"' + G
+          + L + 'div class="icon"' + G + '🎬' + L + '/div' + G
+          + L + 'h2' + G + 'No videos yet' + L + '/h2' + G
+          + L + 'p' + G + 'Be the first to post a video on campus!' + L + '/p' + G
+          + L + 'button class="vf-empty-btn" onclick="window.openVideoUpload()"' + G + 'Upload a video' + L + '/button' + G
+        + L + '/div' + G;
+    }
     return;
   }
   feedEl.innerHTML = videos.map(videoCardHtml).join('');
@@ -442,13 +528,9 @@ if (commentInput) {
   });
 }
 
-// Comments sheet gestures
+// ── Comments panel: backdrop tap + Escape to close ──
 (function () {
   if (!commentsModal) return;
-  const sheet = commentsModal.querySelector('.comments-sheet');
-  const dragHandle = commentsModal.querySelector('.comments-drag');
-  const header = commentsModal.querySelector('.comments-header');
-  if (!sheet) return;
 
   commentsModal.addEventListener('click', (e) => {
     if (e.target === commentsModal) {
@@ -458,42 +540,13 @@ if (commentInput) {
     }
   });
 
-  let startY = 0, currentY = 0, dragging = false;
-  function onStart(e) {
-    if (!commentsModal.classList.contains('open')) return;
-    if (e.target.closest('button')) return;
-    if (!(dragHandle && dragHandle.contains(e.target)) && !(header && header.contains(e.target))) return;
-    const y = e.touches ? e.touches[0].clientY : e.clientY;
-    startY = y; currentY = y; dragging = true;
-    sheet.style.transition = 'none';
-  }
-  function onMove(e) {
-    if (!dragging) return;
-    const y = e.touches ? e.touches[0].clientY : e.clientY;
-    currentY = y;
-    const delta = Math.max(0, currentY - startY);
-    sheet.style.transform = 'translateY(' + delta + 'px)';
-    if (e.cancelable && delta > 5) e.preventDefault();
-  }
-  function onEnd() {
-    if (!dragging) return;
-    dragging = false;
-    const delta = currentY - startY;
-    sheet.style.transition = '';
-    sheet.style.transform = '';
-    if (delta > 110) {
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && commentsModal.classList.contains('open')) {
       commentsModal.classList.remove('open');
       document.body.style.overflow = '';
       currentVideoId = null;
     }
-  }
-  sheet.addEventListener('touchstart', onStart, { passive: true });
-  sheet.addEventListener('touchmove', onMove, { passive: false });
-  sheet.addEventListener('touchend', onEnd);
-  sheet.addEventListener('touchcancel', onEnd);
-  sheet.addEventListener('mousedown', onStart);
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onEnd);
+  });
 })();
 
 // ═══════════════════════════════════════════════════════
@@ -710,7 +763,6 @@ if (uploadPostBtn) {
       setTimeout(() => {
         closeUploadSheet();
         uploadInFlight = false;
-        // refresh feed
         loadFeed();
       }, 800);
 
@@ -761,5 +813,6 @@ function uploadWithProgress(formData, onProgress) {
 // INIT
 // ═══════════════════════════════════════════════════════
 loadFeed();
+loadTrendingPills();
 
 })();

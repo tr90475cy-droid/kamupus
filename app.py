@@ -897,21 +897,31 @@ def serialize_video(v, me_id, liked=False, saved=False, reposted=False):
 def api_videos():
     me = current_user()
     page = request.args.get('page', 1, type=int)
-    per_page = 10
+    per_page = 30
     hashtag = (request.args.get('hashtag') or '').strip()
+    q = (request.args.get('q') or '').strip()
 
-    q = (VideoPost.query
-         .filter_by(is_draft=False, is_hidden=False)
-         .order_by(VideoPost.created_at.desc())
-         .limit(per_page)
-         .offset((page - 1) * per_page))
+    from sqlalchemy import or_
+
+    q_obj = VideoPost.query.filter_by(is_draft=False, is_hidden=False)
 
     if hashtag:
-        q = q.filter(VideoPost.hashtags.ilike(f'%{hashtag}%'))
+        q_obj = q_obj.filter(VideoPost.hashtags.ilike(f'%{hashtag}%'))
 
-    videos = q.all()
+    if q:
+        q_obj = q_obj.join(User, VideoPost.user_id == User.id).filter(
+            or_(
+                VideoPost.caption.ilike(f'%{q}%'),
+                VideoPost.hashtags.ilike(f'%{q}%'),
+                User.full_name.ilike(f'%{q}%'),
+            )
+        )
+
+    videos = (q_obj.order_by(VideoPost.created_at.desc())
+              .limit(per_page)
+              .offset((page - 1) * per_page).all())
+
     video_ids = [v.id for v in videos]
-
     liked_ids = saved_ids = reposted_ids = set()
     if video_ids:
         liked_ids = {r[0] for r in db.session.query(VideoLike.video_id)
@@ -931,6 +941,26 @@ def api_videos():
                         v.id in reposted_ids)
         for v in videos
     ])
+
+@app.route('/api/videos/trending-hashtags')
+@verified_required
+def api_videos_trending_hashtags():
+    videos = (VideoPost.query
+              .filter_by(is_draft=False, is_hidden=False)
+              .order_by(VideoPost.created_at.desc())
+              .limit(200).all())
+
+    counts = {}
+    for v in videos:
+        if not v.hashtags:
+            continue
+        for h in v.hashtags.split(','):
+            h = h.strip().lstrip('#').lower()
+            if h:
+                counts[h] = counts.get(h, 0) + 1
+
+    top = sorted(counts.items(), key=lambda x: -x[1])[:15]
+    return jsonify([{'tag': t, 'count': c} for t, c in top])
 
 
 @app.route('/api/videos/upload', methods=['POST'])
