@@ -20,9 +20,7 @@ class User(db.Model):
     subaccount_code = db.Column(db.String(50), index=True)
     paystack_recipient_code = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    last_seen = db.Column(db.DateTime, nullable=True)          # ✅ keep this
-
-    # NO read_at here!
+    last_seen = db.Column(db.DateTime, nullable=True)
 
     verification = db.relationship('StudentVerification', backref='user', uselist=False,
                                    foreign_keys='StudentVerification.user_id',
@@ -63,9 +61,14 @@ class Post(db.Model):
     tag = db.Column(db.String(30), default='gist')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # ── NEW ──
+    views         = db.Column(db.Integer, default=0)
+    reposts_count = db.Column(db.Integer, default=0)
+
     likes = db.relationship('Like', backref='post', cascade='all, delete-orphan')
     comments = db.relationship('Comment', backref='post', cascade='all, delete-orphan',
                                order_by='Comment.created_at')
+    reposts = db.relationship('PostRepost', backref='post', cascade='all, delete-orphan')  # NEW
 
 
 class Like(db.Model):
@@ -87,6 +90,18 @@ class Comment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship('User', foreign_keys=[user_id])
+
+
+# ─────────────────────────────────────────────
+# NEW: Post reposts
+# ─────────────────────────────────────────────
+class PostRepost(db.Model):
+    __tablename__ = 'post_reposts'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('posts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'post_id', name='uq_post_repost'),)
 
 
 class ChatRoom(db.Model):
@@ -120,7 +135,7 @@ class ChatMessage(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    read_at = db.Column(db.DateTime, nullable=True, index=True)  # ✅ must be here
+    read_at = db.Column(db.DateTime, nullable=True, index=True)
 
     user = db.relationship('User')
 
@@ -264,10 +279,10 @@ class PastQuestion(db.Model):
     course_code  = db.Column(db.String(20), nullable=False, index=True)
     course_title = db.Column(db.String(120))
     department   = db.Column(db.String(80), index=True)
-    level        = db.Column(db.String(10), index=True)      # '100', '200', ...
-    semester     = db.Column(db.String(10))                  # 'first', 'second'
-    year         = db.Column(db.Integer, index=True)         # 2023, 2024
-    file_path    = db.Column(db.String(500), nullable=False) # Supabase URL
+    level        = db.Column(db.String(10), index=True)
+    semester     = db.Column(db.String(10))
+    year         = db.Column(db.Integer, index=True)
+    file_path    = db.Column(db.String(500), nullable=False)
     file_name    = db.Column(db.String(200))
     file_size    = db.Column(db.Integer)
     uploader_id  = db.Column(db.Integer, db.ForeignKey('users.id'))
@@ -281,3 +296,98 @@ class PastQuestion(db.Model):
     __table_args__ = (
         db.Index('ix_pq_course_level_year', 'course_code', 'level', 'year'),
     )
+
+
+# ─────────────────────────────────────────────
+# NEW: Video feed models
+# ─────────────────────────────────────────────
+class VideoPost(db.Model):
+    __tablename__ = 'video_posts'
+
+    id                = db.Column(db.Integer, primary_key=True)
+    user_id           = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    video_url         = db.Column(db.String(500), nullable=False)
+    thumbnail_url     = db.Column(db.String(500))
+    caption           = db.Column(db.Text)
+    hashtags          = db.Column(db.String(500))
+    music             = db.Column(db.String(200))
+    duration          = db.Column(db.Float)
+    views             = db.Column(db.Integer, default=0)
+    likes_count       = db.Column(db.Integer, default=0)
+    comments_count    = db.Column(db.Integer, default=0)
+    saves_count       = db.Column(db.Integer, default=0)
+    reposts_count     = db.Column(db.Integer, default=0)
+    is_draft          = db.Column(db.Boolean, default=False)
+    is_hidden         = db.Column(db.Boolean, default=False)
+    moderation_status = db.Column(db.String(20), default='approved')
+    moderation_score  = db.Column(db.Float)
+    report_count      = db.Column(db.Integer, default=0)
+    cloudinary_id     = db.Column(db.String(200))
+    created_at        = db.Column(db.DateTime, default=datetime.utcnow)
+
+    author   = db.relationship('User', backref='video_posts')
+    likes    = db.relationship('VideoLike', backref='video', cascade='all, delete-orphan')
+    comments = db.relationship('VideoComment', backref='video', cascade='all, delete-orphan')
+    saves    = db.relationship('VideoSave', backref='video', cascade='all, delete-orphan')
+    reports  = db.relationship('VideoReport', backref='video', cascade='all, delete-orphan')
+    reposts  = db.relationship('VideoRepost', backref='video', cascade='all, delete-orphan')
+    tags = db.relationship('VideoTag', backref='video', cascade='all, delete-orphan')
+
+
+class VideoLike(db.Model):
+    __tablename__ = 'video_likes'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'video_id', name='uq_video_like'),)
+
+
+class VideoComment(db.Model):
+    __tablename__ = 'video_comments'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    anonymous = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship('User')
+
+
+class VideoSave(db.Model):
+    __tablename__ = 'video_saves'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'video_id', name='uq_video_save'),)
+
+
+class VideoReport(db.Model):
+    __tablename__ = 'video_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    reason = db.Column(db.String(200))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'video_id', name='uq_video_report'),)
+
+
+class VideoRepost(db.Model):
+    __tablename__ = 'video_reposts'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'video_id', name='uq_video_repost'),)
+
+
+class VideoTag(db.Model):
+    __tablename__ = 'video_tags'
+    id = db.Column(db.Integer, primary_key=True)
+    video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('video_id', 'user_id', name='uq_video_tag'),)
+
+    user = db.relationship('User')

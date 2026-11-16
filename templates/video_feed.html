@@ -1,0 +1,699 @@
+{% extends "base.html" %}
+
+{% block title %}Videos · KAMUPUS{% endblock %}
+
+{% block content %}
+
+<style>
+/* ═══════════════════════════════════════════════════════════
+   TIKTOK-STYLE FULL-SCREEN VIDEO FEED
+   ═══════════════════════════════════════════════════════════ */
+.video-feed {
+  position: fixed;
+  inset: 0;
+  height: 100vh;
+  height: 100dvh;                        /* mobile viewport fix */
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+  background: #000;
+  z-index: 100;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.video-feed::-webkit-scrollbar { display: none; }
+
+.video-card {
+  position: relative;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+
+.video-card video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* ── Top header (back + title) ── */
+.vf-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px calc(14px + env(safe-area-inset-top, 0px));
+  background: linear-gradient(to bottom, rgba(0,0,0,0.65), transparent);
+  pointer-events: none;
+}
+.vf-header > * { pointer-events: auto; }
+.vf-back {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.45);
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.vf-title {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+}
+
+/* ── Overlay (author + caption) ── */
+.video-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 24px 80px calc(24px + env(safe-area-inset-bottom, 0px)) 16px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.82) 65%);
+  color: #fff;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.video-overlay > * { pointer-events: auto; }
+
+.video-author {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.video-author-link {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.video-author-link:hover { text-decoration: underline; }
+.video-time {
+  color: rgba(255,255,255,0.7);
+  font-size: 12px;
+}
+.video-caption {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  word-wrap: break-word;
+}
+.video-hashtags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.video-hashtags .hashtag {
+  color: #5eead4;
+  font-size: 13px;
+  font-weight: 600;
+}
+.video-music {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #fff;
+  margin-top: 4px;
+  opacity: 0.95;
+}
+.video-stats {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.85);
+}
+.video-view-count-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.video-view-count-wrap svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ── Right-side action rail ── */
+.video-actions {
+  position: absolute;
+  right: 10px;
+  bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  z-index: 10;
+}
+.v-act {
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  transition: transform 0.12s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.v-act:active { transform: scale(0.9); }
+.v-act svg {
+  width: 34px;
+  height: 34px;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+}
+.v-act .count {
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  min-width: 20px;
+  text-align: center;
+}
+.v-act.liked svg { color: #fe2c55; }
+.v-act.saved svg { color: #fbbf24; }
+.v-act.reposted svg { color: #22c55e; }
+
+/* ── Upload button (top-right) ── */
+.vf-upload {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top, 0px));
+  right: 16px;
+  z-index: 21;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(254, 44, 85, 0.95);
+  border: none;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(254,44,85,0.45);
+}
+
+/* ── Empty / loading states ── */
+.vf-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.7);
+  text-align: center;
+  padding: 24px;
+  gap: 12px;
+}
+.vf-empty .icon { font-size: 64px; }
+.vf-empty h2 {
+  color: #fff;
+  font-size: 18px;
+  margin: 0;
+}
+.vf-empty p {
+  font-size: 14px;
+  margin: 0;
+  max-width: 260px;
+}
+.vf-empty-btn {
+  margin-top: 12px;
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 28px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── Comments bottom sheet (same as home) ── */
+.comments-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0);
+  pointer-events: none;
+  transition: background 0.3s ease;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.comments-modal.open {
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+}
+.comments-sheet {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  background: #fff;
+  border-radius: 20px 20px 0 0;
+  max-height: 82vh;
+  min-height: 55vh;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.18);
+  will-change: transform;
+  touch-action: pan-y;
+}
+.comments-modal.open .comments-sheet { transform: translateY(0); }
+.comments-drag {
+  width: 40px; height: 4px;
+  background: #d1d5db;
+  border-radius: 2px;
+  margin: 10px auto 6px;
+  flex-shrink: 0;
+}
+.comments-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 16px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.comments-header-title {
+  font-size: 15px; font-weight: 600; color: #111;
+}
+.comments-close {
+  background: none; border: none; padding: 6px;
+  cursor: pointer; color: #666; font-size: 18px;
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+.comments-list {
+  flex: 1; overflow-y: auto;
+  padding: 8px 16px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.comments-list .empty {
+  text-align: center; padding: 48px 20px;
+  color: #999; font-size: 14px;
+}
+.comment-item {
+  display: flex; gap: 10px; padding: 10px 0; align-items: flex-start;
+}
+.comment-item + .comment-item { border-top: 1px solid #f5f5f5; }
+.comment-item .comment-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  flex-shrink: 0; object-fit: cover;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; background: #e5e7eb;
+}
+.comment-body { flex: 1; min-width: 0; }
+.comment-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 2px;
+}
+.comment-author {
+  font-size: 13px; font-weight: 600; color: #111;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;
+}
+.comment-time { font-size: 11px; color: #999; flex-shrink: 0; }
+.comment-body p {
+  font-size: 14px; color: #222; line-height: 1.45;
+  margin: 0; word-wrap: break-word; white-space: pre-wrap;
+}
+.comment-input-row {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid #f0f0f0; background: #fff; flex-shrink: 0;
+}
+.comment-anon-btn {
+  border: none; background: #f0f0f0; border-radius: 50%;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0; font-size: 18px;
+}
+.comment-anon-btn.on { background: #fef3c7; }
+.comment-input-row textarea {
+  flex: 1; border: 1px solid #e5e7eb; border-radius: 20px;
+  padding: 10px 14px; font-size: 14px; font-family: inherit;
+  outline: none; max-height: 100px; min-height: 38px;
+  background: #f7f7f8; resize: none; line-height: 1.3;
+}
+.comment-input-row textarea:focus { border-color: #d1d5db; background: #fff; }
+.comment-send-btn {
+  border: none; background: #fe2c55; color: #fff;
+  border-radius: 50%; width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.comment-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Upload composer ── */
+.upload-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0);
+  pointer-events: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: background 0.3s;
+}
+.upload-modal.open {
+  background: rgba(0, 0, 0, 0.65);
+  pointer-events: auto;
+}
+.upload-sheet {
+  width: 100%;
+  max-width: 540px;
+  background: #fff;
+  border-radius: 22px 22px 0 0;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.25);
+}
+.upload-modal.open .upload-sheet { transform: translateY(0); }
+
+.upload-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.upload-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  color: #666;
+  cursor: pointer;
+  padding: 6px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.upload-close:hover { background: #f3f4f6; }
+.upload-title { font-size: 16px; font-weight: 600; color: #111; }
+.upload-post {
+  border: none;
+  background: #fe2c55;
+  color: #fff;
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.upload-post:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.upload-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.upload-preview {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.upload-preview video {
+  width: 100%;
+  border-radius: 12px;
+}
+.upload-change {
+  border: none;
+  background: #f3f4f6;
+  color: #111;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.upload-change:hover { background: #e5e7eb; }
+
+.upload-field {
+  margin-bottom: 18px;
+}
+.upload-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.upload-field textarea,
+.upload-field input[type="text"] {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  background: #dbdddf;
+  resize: vertical;
+}
+.upload-field textarea:focus,
+.upload-field input:focus {
+  border-color: #0e0f10;
+  background: #fff;
+  color: #000;
+}
+
+.upload-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-height: 0;
+}
+.upload-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.hashtag-chip { background: #ecfeff; color: #0e7490; }
+.tag-chip { background: #f3e8ff; color: #6b21a8; }
+.upload-chip .chip-x {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  opacity: 0.6;
+}
+.upload-chip .chip-x:hover { opacity: 1; }
+
+.upload-input-row {
+  display: flex;
+}
+.upload-input-row input {
+  flex: 1;
+}
+
+.upload-tag-results {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 6px;
+  border-radius: 12px;
+  background: #fff;
+}
+.upload-tag-results:empty { display: none; }
+.upload-tag-results .tag-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: #f9fafb;
+  border: none;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+}
+.upload-tag-results .tag-result:hover { background: #eef2ff; }
+.tag-result-av {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.tag-result-av-blank { background: #e5e7eb; }
+.tag-empty {
+  padding: 16px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+}
+
+.video-tagged {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  margin-top: 4px;
+}
+.video-tagged .tagged-user {
+  color: #a5b4fc;
+  text-decoration: none;
+  font-weight: 500;
+}
+.video-tagged .tagged-user:hover { text-decoration: underline; }
+</style>
+
+<!-- ═══════════ FIXED HEADER ═══════════ -->
+<div class="vf-header">
+  <button class="vf-back" onclick="history.length > 1 ? history.back() : (location.href='/home')" aria-label="Back">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+  </button>
+  <div class="vf-title">Videos</div>
+</div>
+
+<!-- ═══════════ UPLOAD BUTTON ═══════════ -->
+<button class="vf-upload" id="vfUpload" aria-label="Upload video">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19"/>
+    <line x1="5" y1="12" x2="19" y2="12"/>
+  </svg>
+</button>
+
+<!-- ═══════════ FEED ═══════════ -->
+<div class="video-feed" id="videoFeed">
+  <div class="vf-empty">
+    <div class="icon">🎬</div>
+    <h2>Loading videos…</h2>
+  </div>
+</div>
+
+<!-- ═══════════ VIDEO UPLOAD COMPOSER ═══════════ -->
+<div class="upload-modal" id="uploadModal">
+  <div class="upload-sheet">
+    <div class="upload-header">
+      <button class="upload-close" id="uploadClose" aria-label="Cancel">✕</button>
+      <div class="upload-title">New Video</div>
+      <button class="upload-post" id="uploadPostBtn" disabled>Post</button>
+    </div>
+
+    <div class="upload-body">
+
+      <!-- Video preview -->
+      <div class="upload-preview">
+        <video id="uploadPreviewVideo" controls playsinline
+               style="background:#000; border-radius:12px; max-height:340px;"></video>
+        <button class="upload-change" id="uploadChange">Change video</button>
+      </div>
+
+      <!-- Caption -->
+      <div class="upload-field">
+        <label>Caption</label>
+        <textarea id="uploadCaption" rows="3"
+                  placeholder="What's this video about?"></textarea>
+      </div>
+
+      <!-- Hashtags -->
+      <div class="upload-field">
+        <label>Hashtags</label>
+        <div class="upload-chips" id="uploadHashtagChips"></div>
+        <div class="upload-input-row">
+          <input id="uploadHashtagInput" type="text"
+                 placeholder="Type a hashtag and press Enter">
+        </div>
+      </div>
+
+      <!-- Tag people -->
+      <div class="upload-field">
+        <label>Tag people</label>
+        <div class="upload-chips" id="uploadTagChips"></div>
+        <div class="upload-input-row">
+          <input id="uploadTagInput" type="text"
+                 placeholder="Search people to tag…" autocomplete="off">
+        </div>
+        <div class="upload-tag-results" id="uploadTagResults"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/video_feed.js') }}"></script>
+<script>
+/* ── Upload button + auto-open compose sheet if ?compose=1 ── */
+(function () {
+  const uploadBtn = document.getElementById('vfUpload');
+  if (uploadBtn) {
+    uploadBtn.addEventListener('click', () => {
+      if (typeof window.openVideoUpload === 'function') window.openVideoUpload();
+      else alert('Video upload coming soon');
+    });
+  }
+
+  // If arrived via /videos?compose=1, trigger the upload flow
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('compose') === '1' && typeof window.openVideoUpload === 'function') {
+    setTimeout(() => window.openVideoUpload(), 300);
+  }
+})();
+</script>
+{% endblock %}

@@ -2,11 +2,15 @@ import eventlet
 eventlet.monkey_patch()
 
 import os
+import io 
 import time
 import uuid
 import json
 import requests
 import threading
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -30,11 +34,15 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     ChatRoom, ChatMember, ChatMessage,
                     Listing, Assignment, Event, EventRSVP, Connection,
                     Follow, ProfileView, AdminAction, AdPayment,
-                    PastQuestion)   # ← this must be there
+                    PastQuestion,
+                    # ── NEW ──
+                    VideoPost, VideoLike, VideoComment, VideoSave,
+                    VideoReport, PostRepost, VideoRepost, VideoTag)
 # NOTE: analyze_image is imported lazily inside verify() so heavy ML
 # dependencies don't crash Railway boot.
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func, text
+from werkzeug.exceptions import RequestEntityTooLarge
 
 # ─────────────────────────────────────────────
 # SUPABASE STORAGE SETUP
@@ -49,6 +57,21 @@ if SUPABASE_URL and SUPABASE_KEY:
     print('✓ Supabase Storage configured (via direct HTTPS API)')
 else:
     print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
+
+    # ─────────────────────────────────────────────
+# CLOUDINARY
+# ─────────────────────────────────────────────
+cloudinary.config(
+    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
+    api_key=os.environ.get('CLOUDINARY_API_KEY'),
+    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
+    secure=True,
+)
+
+if os.environ.get('CLOUDINARY_CLOUD_NAME'):
+    print('✓ Cloudinary configured')
+else:
+    print('⚠ CLOUDINARY_* env vars not set — video upload disabled')
 
 # ─────────────────────────────────────────────
 # APP SETUP
@@ -258,6 +281,60 @@ def delete_upload(path):
             print(f'✓ [DELETE] {key}')
     except Exception as e:
         print(f'⚠ [SUPABASE DELETE EXCEPTION] {type(e).__name__}: {e}')
+
+def save_video(file, prefix, max_size_mb=50):
+    """Chunked upload to Cloudinary. Returns (url, thumb, duration, public_id)."""
+    global _last_upload_error
+    _last_upload_error = None
+
+    if not os.environ.get('CLOUDINARY_CLOUD_NAME'):
+        _last_upload_error = 'Cloudinary not configured'
+        return None, None, None, None
+
+    # ── Size check ──
+    file.seek(0, os.SEEK_END)
+    size_bytes = file.tell()
+    file.seek(0)
+    if size_bytes > max_size_mb * 1024 * 1024:
+        _last_upload_error = f'File exceeds {max_size_mb} MB limit'
+        return None, None, None, None
+
+    # ── Read bytes, wrap in BytesIO (FileStorage is not context-manager safe) ──
+    try:
+        file_bytes = file.read()
+    except Exception as e:
+        _last_upload_error = f'Could not read file: {e}'
+        return None, None, None, None
+
+    stream = io.BytesIO(file_bytes)
+    stream.name = getattr(file, 'filename', None) or 'video.mp4'   # Cloudinary infers extension from .name
+
+    # ── Upload ──
+    try:
+        result = cloudinary.uploader.upload_large(
+            stream,
+            resource_type='video',
+            folder=f'kamupus/{prefix}',
+            chunk_size=6 * 1024 * 1024,
+            timeout=180,
+            moderation='google_video_moderation',
+            notification_url='https://kamupus.com/cloudinary/webhook',
+            eager=[{'width': 400, 'height': 400, 'crop': 'fill', 'format': 'jpg'}],
+            eager_async=True,
+        )
+    except Exception as e:
+        _last_upload_error = f'{type(e).__name__}: {e}'
+        print(f'❌ [CLOUDINARY UPLOAD] {_last_upload_error}')
+        return None, None, None, None
+
+    public_id = result.get('public_id')
+    video_url = result.get('secure_url')
+    thumb_url = cloudinary.CloudinaryVideo(public_id).build_url(
+        resource_type='video',
+        transformation=[{'width': 400, 'height': 400, 'crop': 'fill', 'format': 'jpg'}],
+    )
+    duration = result.get('duration')
+    return video_url, thumb_url, duration, public_id
 
 def time_ago(dt):
     if not dt:
@@ -533,15 +610,16 @@ def home():
 # ─────────────────────────────────────────────
 # FEED
 # ─────────────────────────────────────────────
-def serialize_post(p, me_id, like_count=None, comment_count=None, liked=None):
-    """Serialize a post. Pass like_count/comment_count/liked explicitly
-    when serializing in bulk (avoids per-post lazy loads)."""
+def serialize_post(p, me_id, like_count=None, comment_count=None,
+                   liked=None, reposted=None):
     if liked is None:
         liked = any(l.user_id == me_id for l in p.likes)
     if like_count is None:
         like_count = len(p.likes)
     if comment_count is None:
         comment_count = len(p.comments)
+    if reposted is None:
+        reposted = any(r.user_id == me_id for r in p.reposts)
 
     if p.anonymous:
         author, avatar, user_id = 'Anonymous Student', None, None
@@ -561,29 +639,31 @@ def serialize_post(p, me_id, like_count=None, comment_count=None, liked=None):
         'time': time_ago(p.created_at), 'tag': p.tag, 'content': p.content,
         'image': get_file_url(p.image_path),
         'likes': like_count, 'comments': comment_count, 'liked': liked,
+        'views':    p.views or 0,
+        'reposts':  p.reposts_count or 0,
+        'reposted': reposted,
         'mine': p.user_id == me_id,
     }
 
 def _batch_post_counts(post_ids, me_id):
-    """Single-query counts for a list of posts."""
     if not post_ids:
-        return {}, {}, set()
+        return {}, {}, set(), set()
     like_map = dict(
         db.session.query(Like.post_id, func.count(Like.id))
         .filter(Like.post_id.in_(post_ids))
-        .group_by(Like.post_id)
-        .all()
+        .group_by(Like.post_id).all()
     )
     cmt_map = dict(
         db.session.query(Comment.post_id, func.count(Comment.id))
         .filter(Comment.post_id.in_(post_ids))
-        .group_by(Comment.post_id)
-        .all()
+        .group_by(Comment.post_id).all()
     )
     liked_ids = {r[0] for r in db.session.query(Like.post_id)
-                 .filter(Like.user_id == me_id, Like.post_id.in_(post_ids))
-                 .all()}
-    return like_map, cmt_map, liked_ids
+                 .filter(Like.user_id == me_id, Like.post_id.in_(post_ids)).all()}
+    reposted_ids = {r[0] for r in db.session.query(PostRepost.post_id)
+                    .filter(PostRepost.user_id == me_id,
+                            PostRepost.post_id.in_(post_ids)).all()}
+    return like_map, cmt_map, liked_ids, reposted_ids
 
 @app.route('/api/feed')
 @verified_required
@@ -620,7 +700,7 @@ def api_feed():
 
     posts = q.limit(30).all()
     post_ids = [p.id for p in posts]
-    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me.id)
+    like_map, cmt_map, liked_ids, reposted_ids = _batch_post_counts(post_ids, me.id)
 
     now = datetime.utcnow()
 
@@ -639,14 +719,15 @@ def api_feed():
     posts.sort(key=score, reverse=True)
 
     return jsonify([
-        serialize_post(
-            p, me.id,
-            like_count=like_map.get(p.id, 0),
-            comment_count=cmt_map.get(p.id, 0),
-            liked=(p.id in liked_ids),
-        )
-        for p in posts
-    ])
+    serialize_post(
+        p, me.id,
+        like_count=like_map.get(p.id, 0),
+        comment_count=cmt_map.get(p.id, 0),
+        liked=(p.id in liked_ids),
+        reposted=(p.id in reposted_ids),   # ← NEW
+    )
+    for p in posts
+])
 
 @app.route('/api/posts', methods=['POST'])
 @verified_required
@@ -737,10 +818,295 @@ def api_comments(pid):
         'content': c.content, 'time': time_ago(c.created_at),
     } for c in p.comments])
 
+    # ─────────────────────────────────────────────
+# POST VIEWS + REPOSTS
+# ─────────────────────────────────────────────
+@app.route('/api/posts/<int:pid>/view', methods=['POST'])
+@verified_required
+def api_post_view(pid):
+    p = Post.query.get_or_404(pid)
+    p.views = (p.views or 0) + 1
+    db.session.commit()
+    return jsonify({'views': p.views})
+
+
+@app.route('/api/posts/<int:pid>/repost', methods=['POST'])
+@verified_required
+def api_post_repost(pid):
+    me = current_user().id
+    p = Post.query.get_or_404(pid)
+    existing = PostRepost.query.filter_by(user_id=me, post_id=pid).first()
+    if existing:
+        db.session.delete(existing)
+        p.reposts_count = max(0, (p.reposts_count or 0) - 1)
+        reposted = False
+    else:
+        db.session.add(PostRepost(user_id=me, post_id=pid))
+        p.reposts_count = (p.reposts_count or 0) + 1
+        reposted = True
+    db.session.commit()
+    return jsonify({'reposted': reposted, 'reposts': p.reposts_count})
+
 @app.route('/uploads/<path:filename>')
 @login_required
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+    # ─────────────────────────────────────────────
+# VIDEO FEED
+# ─────────────────────────────────────────────
+ALLOWED_VIDEO_EXT = {'mp4', 'mov', 'avi', 'webm', 'mkv'}
+
+@app.route('/videos')
+@verified_required
+def video_feed():
+    return render_template('video_feed.html', user=current_user())
+
+
+def serialize_video(v, me_id, liked=False, saved=False, reposted=False):
+    return {
+        'id': v.id,
+        'video_url': v.video_url,
+        'thumbnail_url': v.thumbnail_url,
+        'caption': v.caption,
+        'hashtags': v.hashtags.split(',') if v.hashtags else [],
+        'tagged': [{
+            'id': t.user.id,
+            'name': t.user.full_name,
+            'avatar': user_avatar(t.user),
+        } for t in v.tags if t.user],
+        'music': v.music,
+        'duration': v.duration,
+        'views': v.views or 0,
+        'likes': v.likes_count or 0,
+        'comments': v.comments_count or 0,
+        'saves': v.saves_count or 0,
+        'reposts': v.reposts_count or 0,
+        'reposted': reposted,
+        'author': v.author.full_name,
+        'author_id': v.author.id,
+        'author_avatar': user_avatar(v.author),
+        'liked': liked,
+        'saved': saved,
+        'mine': v.user_id == me_id,
+        'time': time_ago(v.created_at),
+    }
+
+
+@app.route('/api/videos')
+@verified_required
+def api_videos():
+    me = current_user()
+    page = request.args.get('page', 1, type=int)
+    per_page = 10
+    hashtag = (request.args.get('hashtag') or '').strip()
+
+    q = (VideoPost.query
+         .filter_by(is_draft=False, is_hidden=False)
+         .order_by(VideoPost.created_at.desc())
+         .limit(per_page)
+         .offset((page - 1) * per_page))
+
+    if hashtag:
+        q = q.filter(VideoPost.hashtags.ilike(f'%{hashtag}%'))
+
+    videos = q.all()
+    video_ids = [v.id for v in videos]
+
+    liked_ids = saved_ids = reposted_ids = set()
+    if video_ids:
+        liked_ids = {r[0] for r in db.session.query(VideoLike.video_id)
+                     .filter(VideoLike.user_id == me.id,
+                             VideoLike.video_id.in_(video_ids)).all()}
+        saved_ids = {r[0] for r in db.session.query(VideoSave.video_id)
+                     .filter(VideoSave.user_id == me.id,
+                             VideoSave.video_id.in_(video_ids)).all()}
+        reposted_ids = {r[0] for r in db.session.query(VideoRepost.video_id)
+                        .filter(VideoRepost.user_id == me.id,
+                                VideoRepost.video_id.in_(video_ids)).all()}
+
+    return jsonify([
+        serialize_video(v, me.id,
+                        v.id in liked_ids,
+                        v.id in saved_ids,
+                        v.id in reposted_ids)
+        for v in videos
+    ])
+
+
+@app.route('/api/videos/upload', methods=['POST'])
+@verified_required
+def api_video_upload():
+    me = current_user()
+    file = request.files.get('video')
+    if not file or not file.filename:
+        return jsonify({'error': 'Video file required'}), 400
+
+    ext = file.filename.rsplit('.', 1)[-1].lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        return jsonify({'error': 'Only MP4, MOV, AVI, WEBM, MKV allowed'}), 400
+
+    caption  = (request.form.get('caption')  or '').strip()
+    hashtags = (request.form.get('hashtags') or '').strip()
+    tagged_raw = (request.form.get('tagged_user_ids') or '').strip()
+    is_draft = (request.form.get('draft') or 'false').lower() == 'true'
+
+    video_url, thumb_url, duration, public_id = save_video(file, f'video{me.id}')
+    if not video_url:
+        return jsonify({'error': f'Upload failed: {_last_upload_error or "unknown"}'}), 500
+
+    if duration and duration > 60:
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type='video')
+        except Exception:
+            pass
+        return jsonify({'error': 'Video must be 60 seconds or shorter'}), 400
+
+    v = VideoPost(
+        user_id=me.id, video_url=video_url, thumbnail_url=thumb_url,
+        caption=caption, hashtags=hashtags, music='',
+        duration=duration, is_draft=is_draft,
+        cloudinary_id=public_id,
+        moderation_status='approved' if is_draft else 'pending',
+    )
+    db.session.add(v)
+    db.session.flush()
+
+    # ── Tag people ──
+    if tagged_raw:
+        for uid_str in tagged_raw.split(','):
+            try:
+                uid = int(uid_str.strip())
+            except (TypeError, ValueError):
+                continue
+            if uid == me.id:
+                continue
+            if not db.session.get(User, uid):
+                continue
+            db.session.add(VideoTag(video_id=v.id, user_id=uid))
+
+    db.session.commit()
+    return jsonify({'ok': True, 'id': v.id, 'draft': is_draft})
+
+
+@app.route('/api/videos/<int:vid>/publish', methods=['POST'])
+@verified_required
+def api_video_publish(vid):
+    me = current_user()
+    v = VideoPost.query.get_or_404(vid)
+    if v.user_id != me.id:
+        abort(403)
+    v.is_draft = False
+    v.moderation_status = 'pending'
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/videos/<int:vid>/like', methods=['POST'])
+@verified_required
+def api_video_like(vid):
+    me = current_user().id
+    v = VideoPost.query.get_or_404(vid)
+    existing = VideoLike.query.filter_by(user_id=me, video_id=vid).first()
+    if existing:
+        db.session.delete(existing)
+        v.likes_count = max(0, (v.likes_count or 0) - 1)
+        liked = False
+    else:
+        db.session.add(VideoLike(user_id=me, video_id=vid))
+        v.likes_count = (v.likes_count or 0) + 1
+        liked = True
+    db.session.commit()
+    return jsonify({'liked': liked, 'likes': v.likes_count})
+
+
+@app.route('/api/videos/<int:vid>/save', methods=['POST'])
+@verified_required
+def api_video_save(vid):
+    me = current_user().id
+    v = VideoPost.query.get_or_404(vid)
+    existing = VideoSave.query.filter_by(user_id=me, video_id=vid).first()
+    if existing:
+        db.session.delete(existing)
+        v.saves_count = max(0, (v.saves_count or 0) - 1)
+        saved = False
+    else:
+        db.session.add(VideoSave(user_id=me, video_id=vid))
+        v.saves_count = (v.saves_count or 0) + 1
+        saved = True
+    db.session.commit()
+    return jsonify({'saved': saved, 'saves': v.saves_count})
+
+
+@app.route('/api/videos/<int:vid>/repost', methods=['POST'])
+@verified_required
+def api_video_repost(vid):
+    me = current_user().id
+    v = VideoPost.query.get_or_404(vid)
+    existing = VideoRepost.query.filter_by(user_id=me, video_id=vid).first()
+    if existing:
+        db.session.delete(existing)
+        v.reposts_count = max(0, (v.reposts_count or 0) - 1)
+        reposted = False
+    else:
+        db.session.add(VideoRepost(user_id=me, video_id=vid))
+        v.reposts_count = (v.reposts_count or 0) + 1
+        reposted = True
+    db.session.commit()
+    return jsonify({'reposted': reposted, 'reposts': v.reposts_count})
+
+
+@app.route('/api/videos/<int:vid>/comments', methods=['GET', 'POST'])
+@verified_required
+def api_video_comments(vid):
+    v = VideoPost.query.get_or_404(vid)
+    me = current_user()
+    if request.method == 'POST':
+        d = request.get_json() or {}
+        content = (d.get('content') or '').strip()
+        anon = bool(d.get('anonymous'))
+        if not content:
+            return jsonify({'error': 'Empty'}), 400
+        c = VideoComment(user_id=me.id, video_id=vid,
+                         content=content[:1000], anonymous=anon)
+        db.session.add(c)
+        v.comments_count = (v.comments_count or 0) + 1
+        db.session.commit()
+    return jsonify([{
+        'id': c.id,
+        'author': 'Anonymous' if c.anonymous else c.user.full_name,
+        'anonymous': c.anonymous,
+        'avatar': None if c.anonymous else user_avatar(c.user),
+        'content': c.content,
+        'time': time_ago(c.created_at),
+    } for c in v.comments])
+
+
+@app.route('/api/videos/<int:vid>/view', methods=['POST'])
+@verified_required
+def api_video_view(vid):
+    v = VideoPost.query.get_or_404(vid)
+    v.views = (v.views or 0) + 1
+    db.session.commit()
+    return jsonify({'views': v.views})
+
+
+@app.route('/api/videos/<int:vid>/report', methods=['POST'])
+@verified_required
+def api_video_report(vid):
+    me = current_user().id
+    v = VideoPost.query.get_or_404(vid)
+    if VideoReport.query.filter_by(user_id=me, video_id=vid).first():
+        return jsonify({'error': 'Already reported'}), 400
+    d = request.get_json() or {}
+    db.session.add(VideoReport(user_id=me, video_id=vid,
+                               reason=(d.get('reason') or '')[:200]))
+    v.report_count = (v.report_count or 0) + 1
+    if v.report_count >= 3:
+        v.is_hidden = True
+        v.moderation_status = 'flagged'
+    db.session.commit()
+    return jsonify({'ok': True, 'hidden': v.is_hidden})
 
 # ─────────────────────────────────────────────
 # MARKETPLACE
@@ -919,6 +1285,47 @@ def flutterwave_webhook():
             db.session.commit()
             print(f'✓ Sale: listing {listing_id} → buyer {buyer_id} ({ref})')
 
+    return 'ok', 200
+
+@app.route('/cloudinary/webhook', methods=['POST'])
+def cloudinary_webhook():
+    payload = request.get_json(silent=True) or {}
+    if payload.get('notification_type') != 'moderation':
+        return 'ok', 200
+
+    mod = payload.get('moderation', {})
+    public_id = payload.get('public_id')
+    status = mod.get('status')                 # approved / rejected / pending
+    confidence = mod.get('data', {}).get('moderation_confidence', 0)
+
+    v = VideoPost.query.filter_by(cloudinary_id=public_id).first()
+    if not v:
+        return 'ok', 200
+
+    score = float(confidence) * 100
+
+    if status == 'approved':
+        v.moderation_status = 'approved'
+        v.is_hidden = False
+        v.moderation_score = score
+    elif status == 'rejected':
+        if score >= 90:
+            try:
+                cloudinary.uploader.destroy(public_id, resource_type='video')
+            except Exception:
+                pass
+            db.session.delete(v)
+            db.session.commit()
+            return 'ok', 200
+        elif score >= 50:
+            v.moderation_status = 'flagged'
+            v.is_hidden = True
+            v.moderation_score = score
+        else:
+            v.moderation_status = 'approved'
+            v.is_hidden = False
+            v.moderation_score = score
+    db.session.commit()
     return 'ok', 200
 
 # ─────────────────────────────────────────────
@@ -2038,11 +2445,35 @@ def admin_view():
         return redirect(url_for('admin_login'))
 
     touch_admin_session()
-    pending = StudentVerification.query.filter_by(status='pending')\
-        .order_by(StudentVerification.submitted_at.asc()).all()
-    recent = StudentVerification.query.filter(StudentVerification.status != 'pending')\
-        .order_by(StudentVerification.reviewed_at.desc()).limit(20).all()
-    return render_template('admin.html', pending=pending, recent=recent)
+
+    pending = (StudentVerification.query
+               .filter_by(status='pending')
+               .order_by(StudentVerification.submitted_at.asc())
+               .all())
+    recent = (StudentVerification.query
+              .filter(StudentVerification.status != 'pending')
+              .order_by(StudentVerification.reviewed_at.desc())
+              .limit(20).all())
+
+    # ── Badge counts for the header action buttons ──
+    pending_videos = (VideoPost.query
+                      .filter(VideoPost.moderation_status == 'flagged')
+                      .count())
+    pending_pq     = (PastQuestion.query
+                      .filter_by(approved=False)
+                      .count())
+    pending_ads    = (AdPayment.query
+                      .filter_by(status='pending')
+                      .count())
+
+    return render_template(
+        'admin.html',
+        pending=pending,
+        recent=recent,
+        pending_videos=pending_videos,
+        pending_pq=pending_pq,
+        pending_ads=pending_ads,
+    )
 
 app.add_url_rule(app.config['ADMIN_PATH'], 'admin', admin_view)
 
@@ -2152,6 +2583,61 @@ def admin_log_view():
     touch_admin_session()
     logs = AdminAction.query.order_by(AdminAction.created_at.desc()).limit(200).all()
     return render_template('admin_log.html', logs=logs)
+
+@app.route(app.config['ADMIN_PATH'] + '/videos')
+def admin_videos():
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+    flagged = (VideoPost.query
+               .filter(VideoPost.moderation_status == 'flagged')
+               .order_by(VideoPost.created_at.asc()).all())
+    reported = (VideoPost.query
+                .filter(VideoPost.report_count >= 3, VideoPost.is_hidden == True)
+                .order_by(VideoPost.report_count.desc()).all())
+    return render_template('admin_videos.html',
+                           flagged=flagged, reported=reported)
+
+
+@app.route(app.config['ADMIN_PATH'] + '/videos/<int:vid>/approve', methods=['POST'])
+def admin_video_approve(vid):
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+    v = VideoPost.query.get_or_404(vid)
+    v.is_hidden = False
+    v.moderation_status = 'approved'
+    db.session.commit()
+    log_admin_action('video_approve', target_user_id=v.user_id, detail=str(v.id))
+    flash('Video approved', 'success')
+    return redirect(url_for('admin_videos'))
+
+
+@app.route(app.config['ADMIN_PATH'] + '/videos/<int:vid>/delete', methods=['POST'])
+def admin_video_delete(vid):
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+    v = VideoPost.query.get_or_404(vid)
+    if v.cloudinary_id:
+        try:
+            cloudinary.uploader.destroy(v.cloudinary_id, resource_type='video')
+        except Exception:
+            pass
+    db.session.delete(v)
+    db.session.commit()
+    log_admin_action('video_delete', target_user_id=v.user_id, detail=str(vid))
+    flash('Video deleted', 'success')
+    return redirect(url_for('admin_videos'))
 
 # ─────────────────────────────────────────────
 # WEBSOCKET
@@ -2363,6 +2849,27 @@ def debug_supabase():
 
     return jsonify(result)
 
+@app.route('/api/debug/cloudinary')
+@login_required
+def debug_cloudinary():
+    import cloudinary.api
+    result = {
+        'cloud_name_set': bool(os.environ.get('CLOUDINARY_CLOUD_NAME')),
+        'api_key_set': bool(os.environ.get('CLOUDINARY_API_KEY')),
+        'api_secret_set': bool(os.environ.get('CLOUDINARY_API_SECRET')),
+    }
+    if not result['cloud_name_set']:
+        result['error'] = 'CLOUDINARY_CLOUD_NAME missing'
+        return jsonify(result), 500
+    try:
+        # Ping Cloudinary by fetching account usage
+        usage = cloudinary.api.usage()
+        result['plan'] = usage.get('plan', 'unknown')
+        result['credits_used'] = usage.get('credits', {}).get('used_percent', 0)
+    except Exception as e:
+        result['error'] = f'{type(e).__name__}: {e}'
+    return jsonify(result)
+
 # ─────────────────────────────────────────────
 # INIT — non-blocking, background thread
 # ─────────────────────────────────────────────
@@ -2408,17 +2915,27 @@ def _init_db():
                 insp = inspect(db.engine)
                 tables = set(insp.get_table_names())
                 wanted = {
-                    'users': {
-                        'whatsapp_number':         'VARCHAR(20)',
-                        'bio':                     'VARCHAR(200)',
-                        'subaccount_code':         'VARCHAR(50)',
-                        'paystack_recipient_code': 'VARCHAR(50)',
-                        'last_seen':               'TIMESTAMP',
-                    },
-                    'chat_messages': {
-                        'read_at':                 'TIMESTAMP',
-                    },
-                }
+    'users': {
+        'whatsapp_number':         'VARCHAR(20)',
+        'bio':                     'VARCHAR(200)',
+        'subaccount_code':         'VARCHAR(50)',
+        'paystack_recipient_code': 'VARCHAR(50)',
+        'last_seen':               'TIMESTAMP',
+    },
+    'chat_messages': {
+        'read_at':                 'TIMESTAMP',
+    },
+    # ── NEW ──
+    'posts': {
+        'views':                   'INTEGER DEFAULT 0',
+        'reposts_count':           'INTEGER DEFAULT 0',
+    },
+    'video_posts': {
+        'reposts_count':           'INTEGER DEFAULT 0',
+        'cloudinary_id':           'VARCHAR(200)',
+        'moderation_score':        'FLOAT',
+    },
+}
                 with db.engine.begin() as conn:
                     for table, cols in wanted.items():
                         if table not in tables:
@@ -2446,6 +2963,12 @@ def _init_db():
 # Fire-and-forget — gunicorn worker starts serving immediately.
 threading.Thread(target=_init_db, daemon=True).start()
 
+@app.errorhandler(RequestEntityTooLarge)
+def handle_413(e):
+    return jsonify({
+        'error': 'File too large — maximum is 50 MB for videos, 20 MB for images'
+    }), 413
+
 
 # NOTE: production runs via gunicorn (see Procfile). The block below is
 # for local development only — it is intentionally NOT reached in prod.
@@ -2454,27 +2977,25 @@ if __name__ == '__main__':
     debug = os.environ.get('FLASK_ENV') == 'development'
 
     print('=' * 60)
+    print(f'  LOCAL URL  : http://localhost:{port}')
+    print(f'  LOCAL IP   : http://127.0.0.1:{port}')
     print(f'  ADMIN URL  : {app.config["ADMIN_PATH"]}')
     print(f'  ADMIN KEY  : {app.config["ADMIN_KEY"]}')
-    print(f'  ADMIN LOGIN: /admin-login')
+    print(f'  ADMIN LOGIN: http://localhost:{port}/admin-login')
     print(f'  ADMIN EMAIL: {os.environ.get("ADMIN_EMAIL", "oladipobright12@gmail.com")}')
     print(f'  FLW READY  : {"YES" if FLW_SECRET_KEY else "NO"}')
     print(f'  SUPABASE   : {"YES" if (SUPABASE_URL and SUPABASE_KEY) else "NO"}')
+    print(f'  CLOUDINARY : {"YES" if os.environ.get("CLOUDINARY_CLOUD_NAME") else "NO"}')
     print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
-    # ── Local dev on Windows: eventlet is unreliable, use threading ──
-    # Production (Railway) still uses eventlet because the module is
-    # constructed with async_mode='eventlet' above.
     import platform
     if platform.system() == 'Windows':
         print('⚙  Windows detected — using threading backend for local dev', flush=True)
-        # Recreate the SocketIO instance with threading mode
         from flask_socketio import SocketIO as _SIO
         _local_sio = _SIO(app, cors_allowed_origins='*',
                           async_mode='threading',
                           ping_interval=25, ping_timeout=60)
-        # Rebind handlers by copying the server's registered events
         for event in list(socketio.server.handlers.keys()):
             for handler in socketio.server.handlers[event]:
                 _local_sio.on_event(event, handler)

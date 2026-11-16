@@ -4,6 +4,241 @@
 
 {% block content %}
 
+<style>
+/* ═══════════════════════════════════════════════════════════
+   TIKTOK-STYLE COMMENTS BOTTOM SHEET
+   ═══════════════════════════════════════════════════════════ */
+.comments-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0);
+  pointer-events: none;
+  transition: background 0.3s ease;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.comments-modal.open {
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+}
+
+.comments-sheet {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  background: #fff;
+  border-radius: 20px 20px 0 0;
+  max-height: 82vh;
+  min-height: 55vh;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.18);
+  will-change: transform;
+  touch-action: pan-y;
+}
+.comments-modal.open .comments-sheet {
+  transform: translateY(0);
+}
+
+/* Drag handle */
+.comments-drag {
+  width: 40px;
+  height: 4px;
+  background: #d1d5db;
+  border-radius: 2px;
+  margin: 10px auto 6px;
+  flex-shrink: 0;
+}
+
+/* Header */
+.comments-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 16px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.comments-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #111;
+  letter-spacing: -0.01em;
+}
+.comments-close {
+  background: none;
+  border: none;
+  padding: 6px;
+  cursor: pointer;
+  color: #666;
+  font-size: 18px;
+  line-height: 1;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.comments-close:hover { background: #f3f4f6; }
+
+/* List */
+.comments-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.comments-list::-webkit-scrollbar { width: 4px; }
+.comments-list::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 2px;
+}
+.comments-list .empty {
+  text-align: center;
+  padding: 48px 20px;
+  color: #999;
+  font-size: 14px;
+}
+
+/* Comment item */
+.comment-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  align-items: flex-start;
+}
+.comment-item + .comment-item {
+  border-top: 1px solid #f5f5f5;
+}
+.comment-item .comment-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: #e5e7eb;
+}
+.comment-body { flex: 1; min-width: 0; }
+.comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.comment-author {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
+}
+.comment-time {
+  font-size: 11px;
+  color: #999;
+  flex-shrink: 0;
+}
+.comment-body p {
+  font-size: 14px;
+  color: #222;
+  line-height: 1.45;
+  margin: 0;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+/* Input row */
+.comment-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid #f0f0f0;
+  background: #fff;
+  flex-shrink: 0;
+  border-radius: 0 0 0 0;
+}
+.comment-anon-btn {
+  border: none;
+  background: #f0f0f0;
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 18px;
+  transition: background 0.15s, transform 0.1s;
+}
+.comment-anon-btn:active { transform: scale(0.94); }
+.comment-anon-btn.on { background: #fef3c7; }
+
+.comment-input-row textarea {
+  flex: 1;
+  border: 1px solid #e5e7eb;
+  border-radius: 20px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  max-height: 100px;
+  min-height: 38px;
+  background: #f7f7f8;
+  transition: border-color 0.15s, background 0.15s;
+  line-height: 1.3;
+  resize: none;
+}
+.comment-input-row textarea:focus {
+  border-color: #d1d5db;
+  background: #fff;
+}
+
+.comment-send-btn {
+  border: none;
+  background: #fe2c55;
+  color: #fff;
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, transform 0.1s;
+}
+.comment-send-btn:hover { background: #e0244a; }
+.comment-send-btn:active { transform: scale(0.94); }
+.comment-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Mobile tweaks */
+@media (max-width: 480px) {
+  .comments-sheet {
+    max-width: 100%;
+    max-height: 85vh;
+    min-height: 60vh;
+  }
+}
+</style>
+
 <div class="app">
 
   <!-- ═══════════ HEADER ═══════════ -->
@@ -58,12 +293,17 @@
       <span class="action-label">Chat</span>
     </button>
     <button class="action" data-action="pastq">
-  <div class="action-icon">📚</div>
-  <span class="action-label">Past Q</span>
-</button>
+      <div class="action-icon">📚</div>
+      <span class="action-label">Past Q</span>
+    </button>
     <button class="action" data-action="parties">
       <div class="action-icon">🎉</div>
       <span class="action-label">Parties</span>
+    </button>
+    <!-- NEW: Videos shortcut -->
+    <button class="action" data-action="videos">
+      <div class="action-icon">🎬</div>
+      <span class="action-label">Videos</span>
     </button>
     <button class="action" data-action="anonymous" id="anonShortcut">
       <div class="action-icon">🥷</div>
@@ -96,8 +336,8 @@
 <!-- ═══════════ FAB ═══════════ -->
 <button class="fab" id="fab" aria-label="Create post">+</button>
 
-<!-- ═══════════ BOTTOM NAV ═══════════ -->
-<nav class="nav">
+<!-- ═══════════ BOTTOM NAV (6 items — Videos added) ═══════════ -->
+<nav class="nav" style="grid-template-columns: repeat(6, 1fr);">
   <button class="nav-item active" data-tab="home">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
       <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
@@ -120,6 +360,14 @@
       <path d="M8 9V6a4 4 0 0 1 8 0v3"/>
     </svg>
     <span>Market</span>
+  </button>
+  <!-- NEW: Videos nav tab -->
+  <button class="nav-item" data-tab="videos">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m22 8-6 4 6 4V8Z"/>
+      <rect x="2" y="6" width="14" height="12" rx="2"/>
+    </svg>
+    <span>Videos</span>
   </button>
   <button class="nav-item" data-tab="chat">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -175,7 +423,8 @@
           <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>
         </svg>
       </button>
-      <button class="tool-btn" aria-label="Add video">
+      <!-- NEW id="toolVideo" so JS can route to /videos?compose=1 -->
+      <button class="tool-btn" id="toolVideo" aria-label="Add video">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="m22 8-6 4 6 4V8Z"/>
           <rect x="2" y="6" width="14" height="12" rx="2"/>
@@ -197,13 +446,14 @@
   </div>
 </div>
 
-<!-- ═══════════ COMMENTS MODAL ═══════════ -->
-<div class="modal-back" id="commentsModal">
-  <div class="modal modal-tall">
-    <div class="modal-head">
-      <button class="modal-close" id="commentsClose">✕</button>
-      <div class="modal-title">Comments</div>
-      <div class="modal-head-spacer"></div>
+<!-- ═══════════ TIKTOK-STYLE COMMENTS BOTTOM SHEET ═══════════ -->
+<div class="comments-modal" id="commentsModal">
+  <div class="comments-sheet">
+    <div class="comments-drag"></div>
+
+    <div class="comments-header">
+      <div class="comments-header-title">Comments</div>
+      <button class="comments-close" id="commentsClose" aria-label="Close">✕</button>
     </div>
 
     <div class="comments-list" id="commentsList">
@@ -211,10 +461,14 @@
     </div>
 
     <div class="comment-input-row">
-      <button class="anon-chip" id="commentAnon" aria-label="Comment anonymously">🥷</button>
-      <textarea id="commentInput" placeholder="Add a comment…" rows="1"
-                style="resize:none; flex:1;"></textarea>
-      <button class="btn btn-primary btn-sm" id="commentSend">Send</button>
+      <button class="comment-anon-btn" id="commentAnon" aria-label="Comment anonymously">🥷</button>
+      <textarea id="commentInput" placeholder="Add a comment…" rows="1"></textarea>
+      <button class="comment-send-btn" id="commentSend" aria-label="Send">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
     </div>
   </div>
 </div>
@@ -255,4 +509,99 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/home.js') }}"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════
+   VIDEO ENTRY POINTS
+   ═══════════════════════════════════════════════════════════ */
+(function () {
+  // Quick action "Videos"
+  document.querySelector('.actions')?.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-action="videos"]');
+    if (btn) window.location.href = '/videos';
+  });
+
+  // Composer video tool — routes straight into upload sheet
+  document.getElementById('toolVideo')?.addEventListener('click', function () {
+    window.location.href = '/videos?compose=1';
+  });
+
+  // Bottom nav "Videos" tab
+  document.querySelector('.nav')?.addEventListener('click', function (e) {
+    const tab = e.target.closest('.nav-item[data-tab="videos"]');
+    if (tab) window.location.href = '/videos';
+  });
+})();
+
+
+/* ═══════════════════════════════════════════════════════════
+   TIKTOK COMMENTS — DRAG-TO-DISMISS + BACKDROP TAP
+   ═══════════════════════════════════════════════════════════ */
+(function () {
+  const modal = document.getElementById('commentsModal');
+  const sheet = modal?.querySelector('.comments-sheet');
+  const dragHandle = modal?.querySelector('.comments-drag');
+  const header = modal?.querySelector('.comments-header');
+  if (!modal || !sheet) return;
+
+  // ── Backdrop tap to close ──
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal) {
+      modal.classList.remove('open');
+      document.body.style.overflow = '';
+    }
+  });
+
+  // ── Drag-to-dismiss (only from drag handle + header area, not on buttons) ──
+  let startY = 0;
+  let currentY = 0;
+  let dragging = false;
+
+  function isDragStartTarget(target) {
+    if (target.closest('button')) return false;      // don't hijack button taps
+    if (dragHandle && dragHandle.contains(target)) return true;
+    if (header && header.contains(target)) return true;
+    return false;
+  }
+
+  function onStart(e) {
+    if (!modal.classList.contains('open')) return;
+    if (!isDragStartTarget(e.target)) return;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    startY = y;
+    currentY = y;
+    dragging = true;
+    sheet.style.transition = 'none';
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    currentY = y;
+    const delta = Math.max(0, currentY - startY);
+    sheet.style.transform = 'translateY(' + delta + 'px)';
+    if (e.cancelable && delta > 5) e.preventDefault();
+  }
+
+  function onEnd() {
+    if (!dragging) return;
+    dragging = false;
+    const delta = currentY - startY;
+    sheet.style.transition = '';
+    sheet.style.transform = '';
+    if (delta > 110) {
+      modal.classList.remove('open');
+      document.body.style.overflow = '';
+    }
+  }
+
+  sheet.addEventListener('touchstart', onStart, { passive: true });
+  sheet.addEventListener('touchmove', onMove, { passive: false });
+  sheet.addEventListener('touchend', onEnd);
+  sheet.addEventListener('touchcancel', onEnd);
+
+  sheet.addEventListener('mousedown', onStart);
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onEnd);
+})();
+</script>
 {% endblock %}

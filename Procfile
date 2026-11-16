@@ -1,1 +1,1 @@
-web: gunicorn --worker-class eventlet -w 1 --timeout 120 -b 0.0.0.0:$PORT app:app
+web: gunicorn --worker-class eventlet -w 1 --timeout 300 --limit-request-line 0 --limit-request-field_size 0 -b 0.0.0.0:$PORT app:app

@@ -49,7 +49,13 @@ class Config:
 
     # Uploads
     UPLOAD_FOLDER = env_or('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
-    MAX_CONTENT_LENGTH = 20 * 1024 * 1024
+
+    # ── CHANGED ──
+    # Must be > 50 MB (video cap) + a buffer for multipart overhead.
+    # 60 MB gives ~10 MB headroom for form fields, boundary bytes,
+    # and the extra envelope that browsers add on multipart POSTs.
+    MAX_CONTENT_LENGTH = 60 * 1024 * 1024
+
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'pdf'}
 
     # Admin

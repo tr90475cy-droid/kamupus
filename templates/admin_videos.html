@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Admin · Videos{% endblock %}
+
+{% block content %}
+<div class="admin-wrap">
+
+  <div class="admin-head">
+    <div>
+      <h1>Video <em>Moderation</em></h1>
+      <p class="sub">Review AI-flagged and user-reported videos</p>
+    </div>
+    <div class="admin-head-actions">
+      <a href="{{ url_for('admin') }}" class="btn btn-ghost btn-sm">← Back</a>
+      <a href="{{ url_for('admin_lock') }}" class="btn btn-ghost btn-sm">Lock</a>
+    </div>
+  </div>
+
+  <h2 class="admin-section-title">
+    Flagged by AI
+    {% if flagged %}<span class="badge">{{ flagged|length }}</span>{% endif %}
+  </h2>
+
+  {% if not flagged %}
+    <div class="empty">No AI-flagged videos. ✨</div>
+  {% endif %}
+
+  {% for v in flagged %}
+    <div class="verify-card">
+      <div class="verify-head">
+        <div>
+          <div class="verify-name">@{{ v.author.full_name }}</div>
+          <div class="verify-contact">{{ v.caption[:80] or '(no caption)' }}</div>
+        </div>
+        <span class="tag tag-pending">
+          {{ (v.moderation_score or 0)|int }}% confidence
+        </span>
+      </div>
+
+      <video src="{{ v.video_url }}" controls
+             style="width:100%; max-height:400px; border-radius:12px; margin:12px 0; background:#000;"></video>
+
+      <div class="verify-actions">
+        <form method="POST"
+              action="{{ url_for('admin_video_approve', vid=v.id) }}"
+              style="flex:1;">
+          <button type="submit" class="btn btn-success btn-block">✓ Approve</button>
+        </form>
+        <form method="POST"
+              action="{{ url_for('admin_video_delete', vid=v.id) }}"
+              onsubmit="return confirm('Delete this video permanently?');"
+              style="flex:1;">
+          <button type="submit" class="btn btn-danger btn-block">✕ Delete</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+
+  <h2 class="admin-section-title" style="margin-top:36px;">
+    Reported by users (3+)
+    {% if reported %}<span class="badge">{{ reported|length }}</span>{% endif %}
+  </h2>
+
+  {% if not reported %}
+    <div class="empty">No heavily-reported videos. ✨</div>
+  {% endif %}
+
+  {% for v in reported %}
+    <div class="verify-card">
+      <div class="verify-head">
+        <div>
+          <div class="verify-name">@{{ v.author.full_name }}</div>
+          <div class="verify-contact">
+            {{ v.report_count }} report{{ 's' if v.report_count != 1 else '' }}
+            · {{ v.caption[:60] or '(no caption)' }}
+          </div>
+        </div>
+        <span class="tag tag-rejected">{{ v.report_count }} reports</span>
+      </div>
+
+      <video src="{{ v.video_url }}" controls
+             style="width:100%; max-height:400px; border-radius:12px; margin:12px 0; background:#000;"></video>
+
+      <div class="verify-actions">
+        <form method="POST"
+              action="{{ url_for('admin_video_approve', vid=v.id) }}"
+              style="flex:1;">
+          <button type="submit" class="btn btn-success btn-block">✓ Approve</button>
+        </form>
+        <form method="POST"
+              action="{{ url_for('admin_video_delete', vid=v.id) }}"
+              onsubmit="return confirm('Delete this video permanently?');"
+              style="flex:1;">
+          <button type="submit" class="btn btn-danger btn-block">✕ Delete</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+
+</div>
+{% endblock %}
