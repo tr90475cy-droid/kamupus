@@ -609,7 +609,7 @@ function resetComposer() {
   uploadVideo.load();
 
   if (uploadStage) uploadStage.classList.remove('has-video');
-  // ← removed: uploadChange.style.display = 'none';
+  if (uploadChange) uploadChange.style.display = 'none';
 
   uploadPostBtn.textContent = 'Post';
   uploadPostBtn.disabled = true;
@@ -850,5 +850,8 @@ function uploadWithProgress(formData, onProgress) {
     setTimeout(() => window.openVideoUpload(), 400);
   }
 })();
+
+loadFeed();
+loadTrendingPills();
 
 })();
