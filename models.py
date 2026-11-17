@@ -352,10 +352,15 @@ class VideoComment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     video_id = db.Column(db.Integer, db.ForeignKey('video_posts.id'), nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('video_comments.id'), nullable=True)  # NEW
     content = db.Column(db.Text, nullable=False)
     anonymous = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
     user = db.relationship('User')
+    replies = db.relationship('VideoComment',
+                              backref=db.backref('parent', remote_side=[id]),
+                              cascade='all, delete-orphan')
 
 
 class VideoSave(db.Model):

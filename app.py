@@ -1127,25 +1127,61 @@ def api_video_repost(vid):
 def api_video_comments(vid):
     v = VideoPost.query.get_or_404(vid)
     me = current_user()
+
     if request.method == 'POST':
         d = request.get_json() or {}
         content = (d.get('content') or '').strip()
         anon = bool(d.get('anonymous'))
+        parent_id = d.get('parent_id')
+
+        if parent_id is not None:
+            try:
+                parent_id = int(parent_id)
+            except (TypeError, ValueError):
+                parent_id = None
+            if parent_id and not VideoComment.query.filter_by(id=parent_id, video_id=vid).first():
+                parent_id = None
+
         if not content:
             return jsonify({'error': 'Empty'}), 400
-        c = VideoComment(user_id=me.id, video_id=vid,
-                         content=content[:1000], anonymous=anon)
+
+        c = VideoComment(
+            user_id=me.id, video_id=vid,
+            parent_id=parent_id,
+            content=content[:1000], anonymous=anon,
+        )
         db.session.add(c)
         v.comments_count = (v.comments_count or 0) + 1
         db.session.commit()
-    return jsonify([{
-        'id': c.id,
-        'author': 'Anonymous' if c.anonymous else c.user.full_name,
-        'anonymous': c.anonymous,
-        'avatar': None if c.anonymous else user_avatar(c.user),
-        'content': c.content,
-        'time': time_ago(c.created_at),
-    } for c in v.comments])
+
+    all_c = (VideoComment.query
+             .filter_by(video_id=vid)
+             .order_by(VideoComment.created_at.asc())
+             .all())
+
+    by_id = {}
+    top = []
+    for c in all_c:
+        item = {
+            'id': c.id,
+            'author': 'Anonymous' if c.anonymous else c.user.full_name,
+            'anonymous': c.anonymous,
+            'avatar': None if c.anonymous else user_avatar(c.user),
+            'content': c.content,
+            'time': time_ago(c.created_at),
+            'parent_id': c.parent_id,
+            'created_at': c.created_at.isoformat(),
+            'replies': [],
+        }
+        by_id[c.id] = item
+        if c.parent_id is None:
+            top.append(item)
+
+    for c in all_c:
+        if c.parent_id and c.parent_id in by_id:
+            by_id[c.parent_id]['replies'].append(by_id[c.id])
+
+    return jsonify(top)
 
 
 @app.route('/api/videos/<int:vid>/view', methods=['POST'])
@@ -3002,6 +3038,9 @@ def _init_db():
         'moderation_score':        'FLOAT',
     },
     'comments': {
+    'parent_id': 'INTEGER',
+},
+'video_comments': {
     'parent_id': 'INTEGER',
 },
 }
