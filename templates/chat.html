@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Chat{% endblock %}
+
 {% block content %}
 
 <div class="chat-app">
+
   <!-- ═══════════════════════════════════════
        SCREEN 1 — ROOM LIST
        ═══════════════════════════════════════ -->
@@ -37,7 +39,6 @@
       </div>
     </header>
 
-    <!-- Search -->
     <div class="chat-search hidden" id="searchBar">
       <div class="chat-search-input-wrap">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -93,9 +94,7 @@
       <span id="typingText">typing…</span>
     </div>
 
-    <button class="chat-newpill hidden" id="newMessagesPill">
-      ↓ New messages
-    </button>
+    <button class="chat-newpill hidden" id="newMessagesPill">↓ New messages</button>
 
     <form class="chat-composer" id="chatComposer" onsubmit="return false;">
       <input
@@ -117,9 +116,7 @@
 
 </div>
 
-<!-- ═══════════════════════════════════════
-     NEW GROUP MODAL
-     ═══════════════════════════════════════ -->
+<!-- NEW GROUP MODAL -->
 <div class="modal-back" id="newGroupModal">
   <div class="modal">
     <div class="modal-head">
@@ -139,7 +136,19 @@
 </div>
 
 {% endblock %}
+
+
 {% block scripts %}
-<script>window.ME_ID = {{ user.id }};</script>
-<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+  {{ super() }}
+
+  <script>
+    // Safe bootstrap: tojson emits null (not "") when `user` is missing,
+    // and quotes strings so a UUID/string id can't break the script tag.
+    window.ME_ID = {{ (user.id if user else none) | tojson }};
+    if (window.ME_ID == null) {
+      console.error("[chat] window.ME_ID was not provided — pass user=current_user to render_template()");
+    }
+  </script>
+
+  <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
 {% endblock %}
