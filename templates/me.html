@@ -2,6 +2,281 @@
 {% block title %}Profile{% endblock %}
 {% block content %}
 
+<style>
+/* ── TikTok-style video grid ── */
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  margin-bottom: 16px;
+}
+@media (min-width: 720px) {
+  .video-grid { gap: 4px; }
+}
+.video-thumb {
+  position: relative;
+  aspect-ratio: 9 / 16;
+  background: #111;
+  overflow: hidden;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.video-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.video-thumb .play-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  color: rgba(255,255,255,0.9);
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+  pointer-events: none;
+}
+.video-thumb .thumb-views {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.video-thumb .thumb-likes {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(0,0,0,0.35);
+  padding: 2px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 2;
+}
+.video-thumb .thumb-likes:hover { background: rgba(0,0,0,0.6); }
+.video-thumb .thumb-likes svg { width: 11px; height: 11px; }
+
+/* Notification bell badge */
+.notif-bell { position: relative; }
+.notif-bell .badge-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #fe2c55;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.notif-bell .badge-count.on { display: inline-flex; }
+
+/* Video preview modal */
+.video-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0,0,0,0.92);
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.video-preview-modal.open { display: flex; }
+.video-preview-modal .close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+}
+.video-preview-modal video {
+  width: 100%;
+  max-width: 420px;
+  max-height: 88vh;
+  border-radius: 12px;
+}
+.video-preview-meta {
+  position: absolute;
+  bottom: 24px;
+  left: 24px;
+  right: 24px;
+  color: #fff;
+  font-size: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Likers modal */
+.likers-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 3100;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.likers-modal.open { display: flex; }
+.likers-sheet {
+  width: calc(100% - 40px);
+  max-width: 420px;
+  max-height: 70vh;
+  background: #fff;
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.likers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.likers-title { font-size: 15px; font-weight: 700; color: #0a0a0a; }
+.likers-close {
+  background: #f5f5f7;
+  border: none;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.likers-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 8px 0;
+}
+.liker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  text-decoration: none;
+  color: inherit;
+}
+.liker-row:hover { background: #f7f7f8; }
+.liker-avatar {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: #eef0f3;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.liker-info { flex: 1; min-width: 0; }
+.liker-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0a0a0a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.liker-time { font-size: 12px; color: #9ca3af; }
+
+/* Notifications modal */
+.notif-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 3100;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.notif-modal.open { display: flex; }
+.notif-sheet {
+  width: calc(100% - 40px);
+  max-width: 420px;
+  max-height: 72vh;
+  background: #fff;
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.notif-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.notif-title { font-size: 15px; font-weight: 700; color: #0a0a0a; }
+.notif-close {
+  background: #f5f5f7;
+  border: none;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.notif-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 8px 0;
+}
+.notif-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  text-decoration: none;
+  color: inherit;
+}
+.notif-item.unread { background: #fef2f2; }
+.notif-item:hover { background: #f7f7f8; }
+.notif-item.unread:hover { background: #fee2e2; }
+.notif-avatar {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: #eef0f3;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.notif-body { flex: 1; min-width: 0; }
+.notif-text {
+  font-size: 13px;
+  color: #0a0a0a;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.notif-time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+</style>
+
 <div class="app">
 
   <header class="header">
@@ -14,29 +289,33 @@
         <div class="header-brand-sub">Lead City University</div>
       </div>
     </div>
-    <a href="{{ url_for('logout') }}" class="icon-btn" aria-label="Sign out">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-    </a>
+    <div style="display:flex;gap:8px;">
+      <button class="icon-btn notif-bell" id="notifBell" aria-label="Notifications">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+        </svg>
+        <span class="badge-count" id="notifBadge">0</span>
+      </button>
+      <a href="{{ url_for('logout') }}" class="icon-btn" aria-label="Sign out">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </a>
+    </div>
   </header>
 
-  <!-- ═══════════ PROFILE HERO ═══════════ -->
   <div class="profile-hero">
-
     <div class="profile-avatar-wrap">
       {% if avatar %}
         <img class="profile-avatar" src="{{ avatar }}" alt="" id="profileAvatarImg">
       {% else %}
         <div class="profile-avatar profile-avatar-blank" id="profileAvatarImg"></div>
       {% endif %}
-
       <label class="profile-avatar-edit" for="avatarFile" aria-label="Change picture">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 20h9"/>
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+          <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
         </svg>
       </label>
       <input type="file" id="avatarFile" accept="image/*" hidden>
-
       {% if avatar %}
         <button class="profile-avatar-remove" id="avatarRemove" aria-label="Remove picture">✕</button>
       {% endif %}
@@ -57,11 +336,15 @@
         <div class="stat-num">{{ post_count }}</div>
         <div class="stat-label">Posts</div>
       </button>
-      <button class="profile-stat-btn" data-tab="followers" id="statFollowers">
+      <button class="profile-stat-btn" data-tab="videos">
+        <div class="stat-num" id="videosCount">0</div>
+        <div class="stat-label">Videos</div>
+      </button>
+      <button class="profile-stat-btn" data-tab="followers">
         <div class="stat-num" id="followersCount">0</div>
         <div class="stat-label">Followers</div>
       </button>
-      <button class="profile-stat-btn" data-tab="following" id="statFollowing">
+      <button class="profile-stat-btn" data-tab="following">
         <div class="stat-num" id="followingCount">0</div>
         <div class="stat-label">Following</div>
       </button>
@@ -73,7 +356,6 @@
     </div>
   </div>
 
-  <!-- ═══════════ VERIFICATION DETAILS ═══════════ -->
   {% if verification %}
     <div class="detail-list profile-details">
       <div class="row"><span>Matric</span><span>{{ verification.matric_no }}</span></div>
@@ -84,37 +366,38 @@
     </div>
   {% endif %}
 
-  <!-- ═══════════ TABS ═══════════ -->
   <div class="chips profile-tabs" id="profileTabs">
-    <button class="chip active" data-tab="posts">My Posts</button>
+    <button class="chip active" data-tab="posts">Posts</button>
+    <button class="chip" data-tab="videos">Videos</button>
     <button class="chip" data-tab="followers">Followers</button>
     <button class="chip" data-tab="following">Following</button>
   </div>
 
-  <!-- ═══════════ PANEL: MY POSTS ═══════════ -->
   <section class="profile-panel" id="panelPosts">
     <div class="feed" id="myPosts">
       <div class="empty">Loading…</div>
     </div>
   </section>
 
-  <!-- ═══════════ PANEL: FOLLOWERS ═══════════ -->
+  <section class="profile-panel hidden" id="panelVideos">
+    <div class="video-grid" id="myVideos">
+      <div class="empty" style="grid-column:1/-1;">Loading…</div>
+    </div>
+  </section>
+
   <section class="profile-panel hidden" id="panelFollowers">
     <div class="connect-list" id="followersList">
       <div class="empty">Loading…</div>
     </div>
   </section>
 
-  <!-- ═══════════ PANEL: FOLLOWING ═══════════ -->
   <section class="profile-panel hidden" id="panelFollowing">
     <div class="connect-list" id="followingList">
       <div class="empty">Loading…</div>
     </div>
   </section>
-
 </div>
 
-<!-- ═══════════ EDIT PROFILE MODAL ═══════════ -->
 <div class="modal-back" id="editProfileModal">
   <div class="modal">
     <div class="modal-head">
@@ -133,6 +416,39 @@
   </div>
 </div>
 
+<!-- VIDEO PREVIEW MODAL -->
+<div class="video-preview-modal" id="videoPreviewModal">
+  <button class="close" id="videoPreviewClose">✕</button>
+  <video id="videoPreviewPlayer" controls playsinline></video>
+  <div class="video-preview-meta" id="videoPreviewMeta"></div>
+</div>
+
+<!-- LIKERS MODAL -->
+<div class="likers-modal" id="likersModal">
+  <div class="likers-sheet">
+    <div class="likers-header">
+      <div class="likers-title">Liked by</div>
+      <button class="likers-close" id="likersClose">✕</button>
+    </div>
+    <div class="likers-list" id="likersList">
+      <div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- NOTIFICATIONS MODAL -->
+<div class="notif-modal" id="notifModal">
+  <div class="notif-sheet">
+    <div class="notif-header">
+      <div class="notif-title">Notifications</div>
+      <button class="notif-close" id="notifClose">✕</button>
+    </div>
+    <div class="notif-list" id="notifList">
+      <div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <div class="privacy-banner">
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <rect x="3" y="11" width="18" height="11" rx="2"/>
@@ -142,6 +458,7 @@
 </div>
 
 {% endblock %}
+
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/me.js') }}"></script>
 {% endblock %}

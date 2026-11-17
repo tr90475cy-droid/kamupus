@@ -1,16 +1,19 @@
 (() => {
   'use strict';
 
-  // Element refs
+  // ── Element refs ──
   const postsEl         = document.getElementById('myPosts');
+  const videosEl        = document.getElementById('myVideos');
   const followersList   = document.getElementById('followersList');
   const followingList   = document.getElementById('followingList');
   const followersCount  = document.getElementById('followersCount');
   const followingCount  = document.getElementById('followingCount');
+  const videosCount     = document.getElementById('videosCount');
 
   const tabsEl          = document.getElementById('profileTabs');
   const panels = {
     posts:     document.getElementById('panelPosts'),
+    videos:    document.getElementById('panelVideos'),
     followers: document.getElementById('panelFollowers'),
     following: document.getElementById('panelFollowing'),
   };
@@ -28,9 +31,38 @@
   const avatarFile   = document.getElementById('avatarFile');
   const avatarRemove = document.getElementById('avatarRemove');
 
-  // ─────────────────────────────────────────
-  // MY POSTS
-  // ─────────────────────────────────────────
+  // Video preview modal
+  const previewModal  = document.getElementById('videoPreviewModal');
+  const previewPlayer = document.getElementById('videoPreviewPlayer');
+  const previewMeta   = document.getElementById('videoPreviewMeta');
+  const previewClose  = document.getElementById('videoPreviewClose');
+
+  // Likers modal
+  const likersModal  = document.getElementById('likersModal');
+  const likersList   = document.getElementById('likersList');
+  const likersClose  = document.getElementById('likersClose');
+
+  // Notifications
+  const notifBell  = document.getElementById('notifBell');
+  const notifBadge = document.getElementById('notifBadge');
+  const notifModal = document.getElementById('notifModal');
+  const notifList  = document.getElementById('notifList');
+  const notifClose = document.getElementById('notifClose');
+
+  // ── Helpers ──
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[m]));
+  }
+  function fmtCount(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(n);
+  }
+
+  // ── POSTS ──
   async function loadPosts() {
     postsEl.innerHTML = '<div class="empty">Loading…</div>';
     try {
@@ -75,9 +107,106 @@
     `;
   }
 
-  // ─────────────────────────────────────────
-  // FOLLOWERS / FOLLOWING
-  // ─────────────────────────────────────────
+  // ── VIDEOS GRID ──
+  async function loadVideos() {
+    videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">Loading…</div>';
+    try {
+      const r = await fetch('/api/me/videos');
+      const videos = await r.json();
+      videosCount.textContent = videos.length;
+      if (!videos.length) {
+        videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">You haven\'t uploaded any videos yet. Tap the + in the video feed to post your first one.</div>';
+        return;
+      }
+      videosEl.innerHTML = videos.map(videoThumbHtml).join('');
+    } catch {
+      videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">Could not load videos.</div>';
+    }
+  }
+
+  function videoThumbHtml(v) {
+    const thumb = v.thumbnail_url
+      ? `<img src="${esc(v.thumbnail_url)}" alt="" loading="lazy">`
+      : `<div style="width:100%;height:100%;background:#1a1a1a;"></div>`;
+
+    return `
+      <div class="video-thumb" data-vid="${v.id}" data-vurl="${esc(v.video_url)}" data-vcaption="${esc(v.caption || '')}">
+        ${thumb}
+        <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        <span class="thumb-views">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          ${fmtCount(v.views)}
+        </span>
+        <span class="thumb-likes" data-likers="${v.id}" title="See who liked">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78Z"/></svg>
+          ${fmtCount(v.likes)}
+        </span>
+      </div>
+    `;
+  }
+
+  // Click thumbnail → preview modal
+  videosEl.addEventListener('click', (e) => {
+    const likersBtn = e.target.closest('[data-likers]');
+    if (likersBtn) {
+      e.stopPropagation();
+      openLikers(Number(likersBtn.dataset.likers));
+      return;
+    }
+    const thumb = e.target.closest('.video-thumb');
+    if (!thumb) return;
+    previewPlayer.src = thumb.dataset.vurl;
+    previewMeta.textContent = thumb.dataset.vcaption || '';
+    previewModal.classList.add('open');
+    previewPlayer.play().catch(() => {});
+  });
+
+  previewClose.addEventListener('click', closePreview);
+  previewModal.addEventListener('click', (e) => {
+    if (e.target === previewModal) closePreview();
+  });
+  function closePreview() {
+    previewPlayer.pause();
+    previewPlayer.removeAttribute('src');
+    previewPlayer.load();
+    previewModal.classList.remove('open');
+  }
+
+  // ── LIKERS ──
+  async function openLikers(vid) {
+    likersList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>';
+    likersModal.classList.add('open');
+    try {
+      const r = await fetch('/api/videos/' + vid + '/likers');
+      const users = await r.json();
+      if (!users.length) {
+        likersList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">No likes yet.</div>';
+        return;
+      }
+      likersList.innerHTML = users.map(u => `
+        <a class="liker-row" href="/user/${u.id}">
+          ${u.avatar
+            ? `<img class="liker-avatar" src="${esc(u.avatar)}" alt="">`
+            : `<div class="liker-avatar"></div>`}
+          <div class="liker-info">
+            <div class="liker-name">${esc(u.name)}</div>
+            <div class="liker-time">${esc(u.time)} ago</div>
+          </div>
+        </a>
+      `).join('');
+    } catch {
+      likersList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Could not load.</div>';
+    }
+  }
+
+  likersClose.addEventListener('click', () => likersModal.classList.remove('open'));
+  likersModal.addEventListener('click', (e) => {
+    if (e.target === likersModal) likersModal.classList.remove('open');
+  });
+
+  // ── FOLLOWERS / FOLLOWING ──
   async function loadFollowers() {
     followersList.innerHTML = '<div class="empty">Loading…</div>';
     try {
@@ -85,7 +214,7 @@
       const users = await r.json();
       followersCount.textContent = users.length;
       followersList.innerHTML = users.length
-        ? users.map(u => userCard(u, 'follower')).join('')
+        ? users.map(u => userCard(u)).join('')
         : '<div class="empty">No followers yet. Post often to get noticed!</div>';
     } catch {
       followersList.innerHTML = '<div class="empty">Could not load followers.</div>';
@@ -99,21 +228,18 @@
       const users = await r.json();
       followingCount.textContent = users.length;
       followingList.innerHTML = users.length
-        ? users.map(u => userCard(u, 'following')).join('')
+        ? users.map(u => userCard(u)).join('')
         : '<div class="empty">You aren\'t following anyone yet. Tap "Find friends".</div>';
     } catch {
       followingList.innerHTML = '<div class="empty">Could not load following.</div>';
     }
   }
 
-  function userCard(u, mode) {
+  function userCard(u) {
     const avatarHtml = u.avatar
       ? `<img class="connect-avatar" src="${esc(u.avatar)}" alt="">`
       : `<div class="connect-avatar connect-avatar-blank"></div>`;
-
     const meta = [u.level ? u.level + 'L' : '', u.department].filter(Boolean).join(' · ');
-    const action = `<button class="btn btn-ghost btn-sm" data-action="message" data-uid="${u.id}">Message</button>`;
-
     return `
       <div class="connect-card">
         ${avatarHtml}
@@ -122,7 +248,9 @@
           ${meta ? `<div class="connect-meta">${esc(meta)}</div>` : ''}
           ${u.bio ? `<div class="connect-bio">${esc(u.bio)}</div>` : ''}
         </div>
-        <div class="connect-action">${action}</div>
+        <div class="connect-action">
+          <button class="btn btn-ghost btn-sm" data-action="message" data-uid="${u.id}">Message</button>
+        </div>
       </div>
     `;
   }
@@ -135,13 +263,7 @@
     window.location.href = '/chat?dm=' + uid;
   });
 
-  // Preload counts on page load
-  loadFollowers();
-  loadFollowing();
-
-  // ─────────────────────────────────────────
-  // TABS
-  // ─────────────────────────────────────────
+  // ── TABS ──
   tabsEl.addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
@@ -150,17 +272,17 @@
 
     const tab = chip.dataset.tab;
     Object.entries(panels).forEach(([k, el]) => {
+      if (!el) return;
       el.classList.toggle('hidden', k !== tab);
     });
 
     if (tab === 'posts') loadPosts();
+    else if (tab === 'videos') loadVideos();
     else if (tab === 'followers') loadFollowers();
     else if (tab === 'following') loadFollowing();
   });
 
-  // ─────────────────────────────────────────
-  // EDIT PROFILE
-  // ─────────────────────────────────────────
+  // ── EDIT PROFILE ──
   editBtn.addEventListener('click', () => {
     editModal.classList.add('open');
     document.body.style.overflow = 'hidden';
@@ -188,33 +310,22 @@
     } finally { editSave.disabled = false; }
   });
 
-  // ─────────────────────────────────────────
-  // AVATAR UPLOAD
-  // ─────────────────────────────────────────
+  // ── AVATAR ──
   if (avatarFile) {
     avatarFile.addEventListener('change', async () => {
       const file = avatarFile.files[0];
       if (!file) return;
-
-      if (!file.type.startsWith('image/')) {
-        alert('Please choose an image file.');
-        return;
-      }
-
+      if (!file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
       const fd = new FormData();
       fd.append('picture', file);
-
       try {
         const r = await fetch('/api/me/picture', { method: 'POST', body: fd });
-        if (r.ok) {
-          window.location.reload();
-        } else {
+        if (r.ok) window.location.reload();
+        else {
           const err = await r.json().catch(() => ({}));
           alert(err.error || 'Could not upload picture.');
         }
-      } catch {
-        alert('Upload failed. Please try again.');
-      }
+      } catch { alert('Upload failed. Please try again.'); }
     });
   }
 
@@ -226,15 +337,85 @@
     });
   }
 
-  // ─────────────────────────────────────────
-  // HELPERS
-  // ─────────────────────────────────────────
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[m]));
+  // ── NOTIFICATIONS ──
+  async function refreshNotifBadge() {
+    try {
+      const r = await fetch('/api/notifications/unread-count');
+      const d = await r.json();
+      if (d.count > 0) {
+        notifBadge.textContent = d.count > 99 ? '99+' : d.count;
+        notifBadge.classList.add('on');
+      } else {
+        notifBadge.classList.remove('on');
+      }
+    } catch {}
   }
 
-  // Initial load
+  async function openNotifs() {
+    notifList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>';
+    notifModal.classList.add('open');
+    try {
+      const r = await fetch('/api/notifications');
+      const items = await r.json();
+      if (!items.length) {
+        notifList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">No notifications yet.</div>';
+      } else {
+        notifList.innerHTML = items.map(notifHtml).join('');
+      }
+      // mark read
+      fetch('/api/notifications/read', { method: 'POST' })
+        .then(() => refreshNotifBadge())
+        .catch(() => {});
+    } catch {
+      notifList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Could not load.</div>';
+    }
+  }
+
+  function notifHtml(n) {
+    const icon = {
+      video_like: '❤️',
+      video_comment: '💬',
+      video_repost: '🔁',
+      post_like: '❤️',
+      follow: '👤',
+    }[n.type] || '🔔';
+
+    const verb = {
+      video_like: 'liked your video',
+      video_comment: 'commented on your video',
+      video_repost: 'reposted your video',
+      post_like: 'liked your post',
+      follow: 'started following you',
+    }[n.type] || 'interacted with you';
+
+    return `
+      <div class="notif-item ${n.read ? '' : 'unread'}">
+        ${n.actor_avatar
+          ? `<img class="notif-avatar" src="${esc(n.actor_avatar)}" alt="">`
+          : `<div class="notif-avatar"></div>`}
+        <div class="notif-body">
+          <div class="notif-text">
+            <strong>${esc(n.actor)}</strong> ${verb}
+            ${n.preview ? ` <span style="color:#6b7280;">"${esc(n.preview.slice(0, 50))}"</span>` : ''}
+          </div>
+          <div class="notif-time">${esc(n.time)} ago · ${icon}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  notifBell.addEventListener('click', openNotifs);
+  notifClose.addEventListener('click', () => notifModal.classList.remove('open'));
+  notifModal.addEventListener('click', (e) => {
+    if (e.target === notifModal) notifModal.classList.remove('open');
+  });
+
+  // ── INIT ──
   loadPosts();
+  loadVideos();
+  loadFollowers();
+  loadFollowing();
+  refreshNotifBadge();
+  setInterval(refreshNotifBadge, 30000);  // poll every 30s
+
 })();

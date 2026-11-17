@@ -30,6 +30,10 @@ const vfMuteIconOff = document.getElementById('vfMuteIconOff');
 const vfMuteIconOn  = document.getElementById('vfMuteIconOn');
 const uploadStage = document.getElementById('uploadStage');
 const uploadChoose = document.getElementById('uploadChoose');
+const likersModal = document.getElementById('likersModal');
+const likersList  = document.getElementById('likersList');
+const likersTitle = document.getElementById('likersTitle');
+const likersClose = document.getElementById('likersClose');
 
 // ─── State ───
 let currentVideoId = null;
@@ -157,6 +161,74 @@ if (vfMute) {
   });
   updateMuteIcon();
 }
+
+// ═══════════════════════════════════════════════════════
+// LIKERS SHEET
+// ═══════════════════════════════════════════════════════
+async function openLikers(videoId) {
+  if (!likersModal || !likersList) return;
+
+  likersTitle.textContent = 'Liked by';
+  likersList.innerHTML = L + 'div class="likers-empty"' + G + 'Loading…' + L + '/div' + G;
+  likersModal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  try {
+    const r = await fetch('/api/videos/' + videoId + '/likers', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const users = await r.json();
+
+    if (!users || !users.length) {
+      likersTitle.textContent = 'Liked by';
+      likersList.innerHTML = L + 'div class="likers-empty"' + G + 'No likes yet. Be the first!' + L + '/div' + G;
+      return;
+    }
+
+    likersTitle.textContent = users.length + ' ' + (users.length === 1 ? 'person liked this' : 'people liked this');
+
+    likersList.innerHTML = users.map((u) => {
+      const avatar = u.avatar
+        ? L + 'img class="liker-avatar" src="' + escHtml(u.avatar) + '" alt=""' + G
+        : L + 'div class="liker-avatar"' + G + '👤' + L + '/div' + G;
+
+      return L + 'a class="liker-row" href="/user/' + u.id + '"' + G
+        + avatar
+        + L + 'div class="liker-info"' + G
+          + L + 'div class="liker-name"' + G + escHtml(u.name) + L + '/div' + G
+          + L + 'div class="liker-time"' + G + escHtml(u.time) + ' ago' + L + '/div' + G
+        + L + '/div' + G
+        + L + 'svg class="liker-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"' + G
+          + L + 'polyline points="9 18 15 12 9 6"/' + G
+        + L + '/svg' + G
+      + L + '/a' + G;
+    }).join('');
+  } catch (err) {
+    console.error('Likers fetch failed:', err);
+    likersList.innerHTML = L + 'div class="likers-empty"' + G + 'Could not load likes.' + L + '/div' + G;
+  }
+}
+
+function closeLikers() {
+  if (!likersModal) return;
+  likersModal.classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+if (likersClose) {
+  likersClose.addEventListener('click', closeLikers);
+}
+
+if (likersModal) {
+  likersModal.addEventListener('click', (e) => {
+    if (e.target === likersModal) closeLikers();
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && likersModal && likersModal.classList.contains('open')) {
+    closeLikers();
+  }
+});
 
 // ═══════════════════════════════════════════════════════
 // LOAD FEED
@@ -329,7 +401,7 @@ function attachObservers() {
       const card = vid.closest('.video-card');
       if (!card) return;
       if (entry.isIntersecting) {
-        vid.muted = ismuted;
+        vid.muted = isMuted;
         vid.play().catch(() => { vid.muted = true; vid.play().catch(() => {}); });
         registerView(card, vid);
       } else {
@@ -391,9 +463,16 @@ if (feedEl) {
     const id = card.dataset.id;
     const action = btn.dataset.action;
 
-    if (action === 'like') {
+      if (action === 'like') {
+      // If the user tapped the count (not the heart), open likers sheet
+      if (e.target.closest('.like-count')) {
+        openLikers(Number(id));
+        return;
+      }
+
       const countEl = btn.querySelector('.like-count');
       const was = btn.classList.contains('liked');
+      // ... rest unchanged
       const cur = parseInt(countEl.textContent.replace(/[KM]/g, ''), 10) || 0;
       btn.classList.toggle('liked', !was);
       btn.querySelector('svg').setAttribute('fill', !was ? 'currentColor' : 'none');

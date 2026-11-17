@@ -400,3 +400,17 @@ class VideoTag(db.Model):
     __table_args__ = (db.UniqueConstraint('video_id', 'user_id', name='uq_video_tag'),)
 
     user = db.relationship('User')
+
+class Notification(db.Model):
+    __tablename__ = 'notifications'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    actor_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    type = db.Column(db.String(30), nullable=False)  # video_like, video_comment, video_repost, follow, post_like, post_comment
+    target_type = db.Column(db.String(20))  # video, post, user
+    target_id = db.Column(db.Integer)
+    preview = db.Column(db.String(200))
+    read_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    actor = db.relationship('User', foreign_keys=[actor_id])

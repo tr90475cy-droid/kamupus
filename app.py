@@ -35,9 +35,9 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     Listing, Assignment, Event, EventRSVP, Connection,
                     Follow, ProfileView, AdminAction, AdPayment,
                     PastQuestion,
-                    # ── NEW ──
                     VideoPost, VideoLike, VideoComment, VideoSave,
-                    VideoReport, PostRepost, VideoRepost, VideoTag)
+                    VideoReport, PostRepost, VideoRepost, VideoTag,
+                    Notification)   # ← NEW
 # NOTE: analyze_image is imported lazily inside verify() so heavy ML
 # dependencies don't crash Railway boot.
 from sqlalchemy.orm import joinedload
@@ -343,6 +343,18 @@ def time_ago(dt):
     if secs < 3600: return f'{secs // 60}m'
     if secs < 86400: return f'{secs // 3600}h'
     return f'{secs // 86400}d'
+
+def _notify(user_id, actor_id, type_, target_type=None, target_id=None, preview=''):
+    if not user_id or user_id == actor_id:
+        return
+    try:
+        db.session.add(Notification(
+            user_id=user_id, actor_id=actor_id, type=type_,
+            target_type=target_type, target_id=target_id,
+            preview=(preview or '')[:200],
+        ))
+    except Exception as e:
+        print(f'⚠ notify failed: {e}')
 
 # ─────────────────────────────────────────────
 # ADMIN SECURITY
@@ -1082,6 +1094,9 @@ def api_video_like(vid):
         db.session.add(VideoLike(user_id=me, video_id=vid))
         v.likes_count = (v.likes_count or 0) + 1
         liked = True
+        _notify(v.user_id, me, 'video_like',
+                target_type='video', target_id=vid,
+                preview=(v.caption or '')[:80])
     db.session.commit()
     return jsonify({'liked': liked, 'likes': v.likes_count})
 
@@ -1118,6 +1133,9 @@ def api_video_repost(vid):
         db.session.add(VideoRepost(user_id=me, video_id=vid))
         v.reposts_count = (v.reposts_count or 0) + 1
         reposted = True
+        _notify(v.user_id, me, 'video_repost',
+                target_type='video', target_id=vid,
+                preview=(v.caption or '')[:80])
     db.session.commit()
     return jsonify({'reposted': reposted, 'reposts': v.reposts_count})
 
@@ -1152,6 +1170,9 @@ def api_video_comments(vid):
         )
         db.session.add(c)
         v.comments_count = (v.comments_count or 0) + 1
+        _notify(v.user_id, me.id, 'video_comment',
+                target_type='video', target_id=vid,
+                preview=content[:80])
         db.session.commit()
 
     all_c = (VideoComment.query
@@ -2168,6 +2189,92 @@ def api_me_update():
         'whatsapp_number': getattr(u, 'whatsapp_number', '') or '',
     })
 
+@app.route('/api/me/videos')
+@verified_required
+def api_my_videos():
+    me = current_user()
+    videos = (VideoPost.query
+              .filter_by(user_id=me.id, is_draft=False)
+              .order_by(VideoPost.created_at.desc())
+              .limit(200).all())
+    video_ids = [v.id for v in videos]
+    liked_ids = saved_ids = reposted_ids = set()
+    if video_ids:
+        liked_ids = {r[0] for r in db.session.query(VideoLike.video_id)
+                     .filter(VideoLike.user_id == me.id,
+                             VideoLike.video_id.in_(video_ids)).all()}
+        saved_ids = {r[0] for r in db.session.query(VideoSave.video_id)
+                     .filter(VideoSave.user_id == me.id,
+                             VideoSave.video_id.in_(video_ids)).all()}
+        reposted_ids = {r[0] for r in db.session.query(VideoRepost.video_id)
+                        .filter(VideoRepost.user_id == me.id,
+                                VideoRepost.video_id.in_(video_ids)).all()}
+    return jsonify([
+        serialize_video(v, me.id,
+                        v.id in liked_ids,
+                        v.id in saved_ids,
+                        v.id in reposted_ids)
+        for v in videos
+    ])
+
+
+@app.route('/api/videos/<int:vid>/likers')
+@verified_required
+def api_video_likers(vid):
+    VideoPost.query.get_or_404(vid)
+    likes = (VideoLike.query.filter_by(video_id=vid)
+             .order_by(VideoLike.created_at.desc())
+             .limit(300).all())
+    out = []
+    for l in likes:
+        u = db.session.get(User, l.user_id)
+        if not u:
+            continue
+        out.append({
+            'id': u.id,
+            'name': u.full_name,
+            'avatar': user_avatar(u),
+            'time': time_ago(l.created_at),
+        })
+    return jsonify(out)
+
+
+@app.route('/api/notifications')
+@verified_required
+def api_notifications():
+    me = current_user()
+    rows = (Notification.query
+            .filter_by(user_id=me.id)
+            .order_by(Notification.created_at.desc())
+            .limit(50).all())
+    return jsonify([{
+        'id': n.id,
+        'actor': n.actor.full_name if n.actor else 'Someone',
+        'actor_avatar': user_avatar(n.actor) if n.actor else None,
+        'type': n.type,
+        'preview': n.preview or '',
+        'read': bool(n.read_at),
+        'time': time_ago(n.created_at),
+    } for n in rows])
+
+
+@app.route('/api/notifications/unread-count')
+@verified_required
+def api_notifications_unread():
+    me = current_user()
+    c = Notification.query.filter_by(user_id=me.id, read_at=None).count()
+    return jsonify({'count': c})
+
+
+@app.route('/api/notifications/read', methods=['POST'])
+@verified_required
+def api_notifications_read():
+    me = current_user()
+    Notification.query.filter_by(user_id=me.id, read_at=None)\
+        .update({'read_at': datetime.utcnow()}, synchronize_session=False)
+    db.session.commit()
+    return jsonify({'ok': True})
+
 @app.route('/api/me/posts')
 @verified_required
 def api_my_posts():
@@ -2410,6 +2517,7 @@ def api_follow(uid):
     existing = Follow.query.filter_by(follower_id=me, following_id=uid).first()
     if not existing:
         db.session.add(Follow(follower_id=me, following_id=uid))
+        _notify(uid, me, 'follow', target_type='user', target_id=me)
         db.session.commit()
     return jsonify({
         'following': True,
