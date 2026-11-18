@@ -144,11 +144,8 @@
   <script>
     // Safe bootstrap: tojson emits null (not "") when `user` is missing,
     // and quotes strings so a UUID/string id can't break the script tag.
-    window.ME_ID = {{ (user.id if user else none) | tojson }};
-    if (window.ME_ID == null) {
-      console.error("[chat] window.ME_ID was not provided — pass user=current_user to render_template()");
-    }
+    window.ME_ID = {{ user_id | default('', true) | tojson }};
   </script>
 
-  <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/chat.js') }}" defer></script>
 {% endblock %}

@@ -13,6 +13,7 @@ import cloudinary.uploader
 import cloudinary.api
 from datetime import datetime, timedelta
 from functools import wraps
+from flask_login import current_user, login_required
 
 _online_lock = threading.Lock()
 _online_users = {}          # user_id -> set of sid
@@ -43,6 +44,7 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func, text
 from werkzeug.exceptions import RequestEntityTooLarge
+
 
 # ─────────────────────────────────────────────
 # SUPABASE STORAGE SETUP
@@ -1862,10 +1864,12 @@ def api_event_rsvp(eid):
 # CHAT
 # ─────────────────────────────────────────────
 @app.route('/chat')
-@verified_required
+@login_required
 def chat():
-    return render_template('chat.html', user=current_user())
-
+    return render_template(
+        'chat.html',
+        user_id=current_user.get_id()
+    )
 def dm_key_for(a, b):
     return '-'.join(map(str, sorted([a, b])))
 
