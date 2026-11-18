@@ -16,7 +16,14 @@
 (() => {
   'use strict';
 
-  const ME_ID = String(window.ME_ID ?? '');
+const ME_ID = window.ME_ID ? String(window.ME_ID) : "";
+if (!ME_ID) {
+    console.error("[chat] ME_ID is empty — user not logged in? Check /chat route.");
+    document.getElementById("roomList").innerHTML =
+        '<div class="chat-empty">Please sign in to view your chats.</div>';
+} else {
+    loadRooms();   // or whatever your initial fetch is named
+}
   const ROOT = (window.CHAT_API_BASE || '').replace(/\/$/, '');
 
   // Change these paths to match your Flask routes.
