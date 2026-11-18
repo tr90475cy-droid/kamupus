@@ -14,6 +14,7 @@ import cloudinary.api
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_login import current_user, login_required
+from flask import session
 
 _online_lock = threading.Lock()
 _online_users = {}          # user_id -> set of sid
@@ -1864,11 +1865,10 @@ def api_event_rsvp(eid):
 # CHAT
 # ─────────────────────────────────────────────
 @app.route('/chat')
-@login_required
 def chat():
     return render_template(
         'chat.html',
-        user_id=current_user.get_id()
+        user_id=session.get('user_id')
     )
 def dm_key_for(a, b):
     return '-'.join(map(str, sorted([a, b])))
