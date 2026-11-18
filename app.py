@@ -1869,9 +1869,9 @@ def api_event_rsvp(eid):
 @app.route("/chat")
 @login_required
 def chat():
-    u = current_user()                     # your session-based helper
+    u = current_user()
     return render_template("chat.html", user=u, me_id=u.id if u else None)
-    
+
 def dm_key_for(a, b):
     return '-'.join(map(str, sorted([a, b])))
 
@@ -1890,23 +1890,24 @@ def serialize_room_for(r, me, unread_count=0):
         other_last_seen = (other.last_seen.isoformat()
                            if other and other.last_seen else None)
 
-    unread = unread_count
-    unread_label = ''
-    if unread > 0:
-        unread_label = f'{unread} new message' + ('s' if unread != 1 else '')
-
     return {
-        'id': r.id, 'name': display_name, 'avatar': avatar,
-        'is_group': r.is_group, 'other_user_id': other_user_id,
+        'id': r.id, 
+        'name': display_name, 
+        'avatar': avatar,
+        'is_group': r.is_group, 
+        'other_user_id': other_user_id,
         'last_message': last_msg.content if last_msg else '',
         'last_time': time_ago(last_msg.created_at) if last_msg else '',
         'last_is_mine': (last_msg.user_id == me.id) if last_msg else False,
         'member_count': len(r.members),
-        'unread': unread,
-        'unread_label': unread_label,
+        'unread': unread_count,
         'online': other_online,
         'last_seen': other_last_seen,
     }
+
+# ─────────────────────────────────────────────
+# CHAT ROOMS & MESSAGES
+# ─────────────────────────────────────────────
 
 @app.route('/api/chat/rooms', methods=['GET'])
 @verified_required
@@ -1945,12 +1946,70 @@ def api_chat_rooms_list():
         for r in rooms
     ])
 
+@app.route('/api/chat/rooms/<int:rid>/messages', methods=['GET', 'POST'])
+@verified_required
+def api_chat_messages(rid):
+    me = current_user()
+    if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
+        abort(403)
+    room = ChatRoom.query.get_or_404(rid)
+    
+    # ── SEND A MESSAGE ──
+    if request.method == 'POST':
+        d = request.get_json() or {}
+        content = (d.get('content') or '').strip()
+        if not content:
+            return jsonify({'error': 'Empty message'}), 400
+            
+        msg = ChatMessage(room_id=rid, user_id=me.id, content=content)
+        db.session.add(msg)
+        db.session.commit()
+        
+        socketio.emit('new_message', {
+            'room_id': rid,
+            'id': msg.id,
+            'content': msg.content,
+            'user_id': msg.user_id,
+            'author': me.full_name,
+            'avatar': user_avatar(me),
+            'time': msg.created_at.strftime('%I:%M %p'),
+            'created_at': msg.created_at.isoformat(),
+            'mine': False
+        }, room=f"chat_{rid}")
+        
+        return jsonify({
+            'id': msg.id, 'content': msg.content, 'user_id': msg.user_id,
+            'author': me.full_name, 'avatar': user_avatar(me),
+            'mine': True, 'time': msg.created_at.strftime('%I:%M %p'),
+            'created_at': msg.created_at.isoformat(), 'read_at': None
+        })
+        
+    # ── FETCH MESSAGES ──
+    return jsonify([{
+        'id': m.id, 'content': m.content, 'user_id': m.user_id,
+        'author': m.user.full_name, 'avatar': user_avatar(m.user),
+        'mine': m.user_id == me.id,
+        'time': m.created_at.strftime('%I:%M %p'),
+        'created_at': m.created_at.isoformat(),
+        'read_at': m.read_at.isoformat() if m.read_at else None,
+    } for m in room.messages])
+
+@app.route('/api/chat/rooms/<int:rid>/read', methods=['POST'])
+@verified_required
+def api_chat_read(rid):
+    me = current_user()
+    ChatMessage.query.filter(
+        ChatMessage.room_id == rid, 
+        ChatMessage.user_id != me.id, 
+        ChatMessage.read_at.is_(None)
+    ).update({'read_at': datetime.utcnow()}, synchronize_session=False)
+    db.session.commit()
+    return jsonify({'ok': True})
+
 @app.route('/api/chat/rooms/<int:rid>/unread-count')
 @verified_required
 def api_chat_unread(rid):
     me = current_user()
-    if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
-        abort(403)
     count = (ChatMessage.query
              .filter(ChatMessage.room_id == rid,
                      ChatMessage.user_id != me.id,
@@ -1972,21 +2031,9 @@ def api_chat_total_unread():
              .count())
     return jsonify({'count': count})
 
-@app.route('/api/chat/rooms/<int:rid>/messages')
-@verified_required
-def api_chat_messages(rid):
-    me = current_user().id
-    if not ChatMember.query.filter_by(room_id=rid, user_id=me).first():
-        abort(403)
-    room = ChatRoom.query.get_or_404(rid)
-    return jsonify([{
-        'id': m.id, 'content': m.content, 'user_id': m.user_id,
-        'author': m.user.full_name, 'avatar': user_avatar(m.user),
-        'mine': m.user_id == me,
-        'time': m.created_at.strftime('%I:%M %p'),
-        'created_at': m.created_at.isoformat(),
-        'read_at': m.read_at.isoformat() if m.read_at else None,
-    } for m in room.messages])
+# ─────────────────────────────────────────────
+# GROUPS, DMS, AND USER LIST
+# ─────────────────────────────────────────────
 
 @app.route('/api/chat/group', methods=['POST'])
 @verified_required
@@ -1996,8 +2043,10 @@ def api_chat_group_create():
     name = (d.get('name') or '').strip()
     member_ids = d.get('member_ids') or []
 
-    if not name: return jsonify({'error': 'Name required'}), 400
-    if len(member_ids) < 2: return jsonify({'error': 'Group needs at least 2 other members'}), 400
+    if not name: 
+        return jsonify({'error': 'Name required'}), 400
+    if len(member_ids) < 1: 
+        return jsonify({'error': 'Group needs at least 1 other member'}), 400
 
     room = ChatRoom(name=name, is_group=True)
     db.session.add(room)
@@ -2008,36 +2057,56 @@ def api_chat_group_create():
         if db.session.get(User, uid):
             db.session.add(ChatMember(room_id=room.id, user_id=uid))
     db.session.commit()
-    return jsonify({'id': room.id, 'name': room.name, 'is_group': True})
+    
+    # Force load members so serialize_room_for works
+    db.session.refresh(room)
+    
+    # Return serialized room to match JS expectations
+    return jsonify(serialize_room_for(room, me))
 
 @app.route('/api/chat/dm/<int:user_id>', methods=['POST'])
 @verified_required
 def api_chat_dm_open(user_id):
-    me = current_user().id
-    if user_id == me:
+    me = current_user()
+    if user_id == me.id:
         return jsonify({'error': 'Cannot DM yourself'}), 400
 
     target = User.query.get_or_404(user_id)
     if target.verification_status != 'verified':
         return jsonify({'error': 'User not verified'}), 403
 
-    key = dm_key_for(me, user_id)
+    key = dm_key_for(me.id, user_id)
     existing = ChatRoom.query.filter_by(dm_key=key).first()
     if existing:
-        return jsonify({'id': existing.id, 'name': target.full_name,
-                        'avatar': user_avatar(target), 'is_group': False,
-                        'other_user_id': target.id})
+        return jsonify(serialize_room_for(existing, me))
 
     room = ChatRoom(name=target.full_name, is_group=False, dm_key=key)
     db.session.add(room)
     db.session.flush()
-    db.session.add(ChatMember(room_id=room.id, user_id=me))
+    db.session.add(ChatMember(room_id=room.id, user_id=me.id))
     db.session.add(ChatMember(room_id=room.id, user_id=user_id))
     db.session.commit()
+    
+    # Force load members
+    db.session.refresh(room)
 
-    return jsonify({'id': room.id, 'name': target.full_name,
-                    'avatar': user_avatar(target), 'is_group': False,
-                    'other_user_id': target.id})
+    return jsonify(serialize_room_for(room, me))
+
+@app.route('/api/chat/users', methods=['GET'])
+@verified_required
+def api_chat_users():
+    me = current_user()
+    users = User.query.filter(
+        User.id != me.id, 
+        User.verification_status == 'verified',
+        User.role != 'admin'
+    ).limit(50).all()
+    
+    return jsonify([{
+        'id': u.id,
+        'full_name': u.full_name,
+        'avatar': user_avatar(u)
+    } for u in users])
 
 # ─────────────────────────────────────────────
 # USER SEARCH
