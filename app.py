@@ -13,9 +13,13 @@ import cloudinary.uploader
 import cloudinary.api
 from datetime import datetime, timedelta
 from functools import wraps
-from flask_login import current_user, login_required
 from flask import render_template
-from flask_login import login_required, current_user
+import secrets
+import hashlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from sqlalchemy import text
 
 
 _online_lock = threading.Lock()
@@ -41,9 +45,7 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     PastQuestion,
                     VideoPost, VideoLike, VideoComment, VideoSave,
                     VideoReport, PostRepost, VideoRepost, VideoTag,
-                    Notification)   # ← NEW
-# NOTE: analyze_image is imported lazily inside verify() so heavy ML
-# dependencies don't crash Railway boot.
+                    Notification, PasswordResetToken)
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func, text
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -183,7 +185,8 @@ def user_avatar(user):
         return None
     return get_file_url(getattr(user, 'profile_picture_path', None))
 
-def login_required(f):
+def session_login_required(f):
+    """Session-based login check (replaces the old shadowing login_required)."""
     @wraps(f)
     def w(*a, **k):
         if not session.get('user_id'):
@@ -201,6 +204,15 @@ def verified_required(f):
             return redirect(url_for('pending'))
         return f(*a, **k)
     return w
+
+def _recent_reset_exists(user_id, minutes=None):
+    if minutes is None:
+        minutes = app.config.get('PASSWORD_RESET_RATE_LIMIT_MINUTES', 5)
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    return PasswordResetToken.query.filter(
+        PasswordResetToken.user_id == user_id,
+        PasswordResetToken.created_at > cutoff,
+    ).first() is not None
 
 # ─────────────────────────────────────────────
 # SUPABASE UPLOAD & DELETE
@@ -361,6 +373,67 @@ def _notify(user_id, actor_id, type_, target_type=None, target_id=None, preview=
     except Exception as e:
         print(f'⚠ notify failed: {e}')
 
+def _send_password_reset_email(to_email, reset_url):
+    """Return (ok, error). If SMTP not configured, prints link and returns True."""
+    if not SMTP_HOST or not SMTP_USER:
+        print('\n' + '=' * 60)
+        print('PASSWORD RESET (SMTP not configured — dev mode)')
+        print(f'  To:   {to_email}')
+        print(f'  Link: {reset_url}')
+        print('=' * 60 + '\n')
+        return True, None
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = 'Reset your KAMUPUS password'
+        msg['From']    = SMTP_FROM
+        msg['To']      = to_email
+
+        minutes = PASSWORD_RESET_TOKEN_MINUTES
+
+        text = (
+            f"Hi,\n\n"
+            f"Someone requested a password reset for this KAMUPUS account.\n"
+            f"Open the link below within {minutes} minutes to set a new password:\n\n"
+            f"{reset_url}\n\n"
+            f"If you didn't request this, ignore this email — your password won't change.\n\n"
+            f"— KAMUPUS\n"
+        )
+        html = f"""\
+        <div style="font-family:system-ui,sans-serif;max-width:520px;margin:auto">
+          <h2 style="color:#111">Reset your KAMUPUS password</h2>
+          <p>Someone requested a password reset for this account.
+             Click the button below within <b>{minutes} minutes</b>.</p>
+          <p style="text-align:center;margin:28px 0">
+            <a href="{reset_url}"
+               style="background:#111;color:#fff;padding:12px 22px;border-radius:8px;
+                      text-decoration:none;display:inline-block">
+              Set a new password
+            </a>
+          </p>
+          <p style="color:#666;font-size:13px">
+            If the button doesn't work, paste this into your browser:<br>
+            <code style="word-break:break-all">{reset_url}</code>
+          </p>
+          <p style="color:#999;font-size:12px">
+            Didn't request this? You can ignore this email — nothing will change.
+          </p>
+        </div>"""
+
+        msg.attach(MIMEText(text, 'plain'))
+        msg.attach(MIMEText(html,  'html'))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True, None
+
+    except Exception as e:
+        print(f'❌ [RESET EMAIL] {type(e).__name__}: {e}')
+        return False, str(e)
+
 # ─────────────────────────────────────────────
 # ADMIN SECURITY
 # ─────────────────────────────────────────────
@@ -504,10 +577,139 @@ def logout():
     return redirect(url_for('login'))
 
 # ─────────────────────────────────────────────
+# FORGOT / RESET PASSWORD
+# ─────────────────────────────────────────────
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    # Already logged in? Send them home.
+    if session.get('user_id'):
+        return redirect(url_for('index'))
+
+    if request.method == 'POST':
+        email = (request.form.get('email') or '').strip().lower()
+
+        # Same message regardless of whether the account exists
+        generic = ('If an account exists for that email, we sent a reset link. '
+                   'Check your inbox and spam folder.')
+
+        if not email or '@' not in email:
+            flash('Please enter a valid email address.', 'error')
+            return render_template('forgot_password.html', email=email)
+
+        user = User.query.filter_by(email=email).first()
+
+        # Rate limit (also acts as a small anti-spam)
+        if user and _recent_reset_exists(user.id):
+            flash('A reset link was already sent recently. Please check your email '
+                  'or try again in a few minutes.', 'info')
+            return render_template('forgot_password.html', email=email)
+
+        if user:
+            try:
+                raw_token  = secrets.token_urlsafe(32)
+                token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+                expires_at = datetime.utcnow() + timedelta(
+                    minutes=app.config['PASSWORD_RESET_TOKEN_MINUTES'])
+
+                # Invalidate any previous unused tokens for this user
+                PasswordResetToken.query.filter_by(
+                    user_id=user.id, used_at=None
+                ).update({'used_at': datetime.utcnow()},
+                         synchronize_session=False)
+
+                db.session.add(PasswordResetToken(
+                    user_id=user.id,
+                    token_hash=token_hash,
+                    expires_at=expires_at,
+                    requested_ip=request.remote_addr or '',
+                ))
+                db.session.commit()
+
+                base = app.config.get('APP_BASE_URL') or request.host_url.rstrip('/')
+                reset_url = f"{base}{url_for('reset_password', token=raw_token)}"
+
+                ok, err = _send_password_reset_email(user.email, reset_url)
+                if not ok:
+                    print(f'⚠ reset email failed for {user.email}: {err}')
+
+            except Exception as e:
+                print(f'⚠ forgot_password error: {e}')
+                db.session.rollback()
+
+        flash(generic, 'success')
+        return render_template('forgot_password.html', email=email)
+
+    return render_template('forgot_password.html', email='')
+
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    if session.get('user_id'):
+        return redirect(url_for('index'))
+
+    if not token:
+        flash('Invalid reset link.', 'error')
+        return redirect(url_for('forgot_password'))
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    row = PasswordResetToken.query.filter_by(token_hash=token_hash).first()
+
+    if not row or row.used_at is not None:
+        flash('This reset link is invalid or has already been used.', 'error')
+        return redirect(url_for('forgot_password'))
+
+    if row.expires_at < datetime.utcnow():
+        flash('This reset link has expired. Please request a new one.', 'error')
+        return redirect(url_for('forgot_password'))
+
+    if request.method == 'POST':
+        password = request.form.get('password') or ''
+        confirm  = request.form.get('confirm')  or ''
+
+        errors = []
+        if len(password) < 6:
+            errors.append('Password must be at least 6 characters.')
+        if password != confirm:
+            errors.append('Passwords do not match.')
+
+        if errors:
+            for e in errors:
+                flash(e, 'error')
+            return render_template('reset_password.html', token=token)
+
+        user = db.session.get(User, row.user_id)
+        if not user:
+            flash('Account not found.', 'error')
+            return redirect(url_for('forgot_password'))
+
+        # Set new password (hash, never reversible)
+        user.password_hash = generate_password_hash(password)
+        row.used_at        = datetime.utcnow()
+
+        # Kill any other outstanding tokens for this user
+        PasswordResetToken.query.filter(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.id != row.id,
+        ).update({'used_at': datetime.utcnow()}, synchronize_session=False)
+
+        db.session.commit()
+
+        # Log them in directly (optional — remove if you prefer re-login)
+        session.clear()
+        session['user_id']  = user.id
+        session.permanent   = True
+
+        flash('Password reset successful. You are now logged in.', 'success')
+        return redirect(url_for('index'))
+
+    return render_template('reset_password.html', token=token)
+
+# ─────────────────────────────────────────────
 # VERIFICATION
 # ─────────────────────────────────────────────
 @app.route('/verify', methods=['GET', 'POST'])
-@login_required
+@session_login_required
 def verify():
     u = current_user()
     if u.verification_status == 'verified':
@@ -607,7 +809,7 @@ def verify():
     return render_template('verify.html', form={})
 
 @app.route('/pending')
-@login_required
+@session_login_required
 def pending():
     u = current_user()
     if u.verification_status == 'verified':
@@ -662,6 +864,7 @@ def serialize_post(p, me_id, like_count=None, comment_count=None,
     }
 
 def _batch_post_counts(post_ids, me_id):
+    """Return (like_map, cmt_map, liked_ids, reposted_ids) — FOUR values."""
     if not post_ids:
         return {}, {}, set(), set()
     like_map = dict(
@@ -901,7 +1104,7 @@ def api_post_repost(pid):
     return jsonify({'reposted': reposted, 'reposts': p.reposts_count})
 
 @app.route('/uploads/<path:filename>')
-@login_required
+@session_login_required
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
@@ -1464,6 +1667,20 @@ def cloudinary_webhook():
 def api_ads_pricing():
     return jsonify(AD_PRICING)
 
+    # ─────────────────────────────────────────────
+# PASSWORD RESET + SMTP  (module-level, no config lookups)
+# ─────────────────────────────────────────────
+PASSWORD_RESET_TOKEN_MINUTES      = int(os.environ.get('PASSWORD_RESET_TOKEN_MINUTES', '30'))
+PASSWORD_RESET_RATE_LIMIT_MINUTES = int(os.environ.get('PASSWORD_RESET_RATE_LIMIT_MINUTES', '5'))
+APP_BASE_URL                      = os.environ.get('APP_BASE_URL', '')
+
+SMTP_HOST     = os.environ.get('SMTP_HOST', '')
+SMTP_PORT     = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER     = os.environ.get('SMTP_USER', '')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+SMTP_FROM     = os.environ.get('SMTP_FROM', 'no-reply@kamupus.com')
+SMTP_USE_TLS  = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
+
 @app.route('/api/market/promote/<int:listing_id>', methods=['POST'])
 @verified_required
 def api_promote_listing(listing_id):
@@ -1867,7 +2084,7 @@ def api_event_rsvp(eid):
 # CHAT
 # ─────────────────────────────────────────────
 @app.route("/chat")
-@login_required
+@session_login_required
 def chat():
     u = current_user()
     return render_template("chat.html", user=u, me_id=u.id if u else None)
@@ -2357,12 +2574,13 @@ def api_my_posts():
     posts = Post.query.options(joinedload(Post.author))\
         .filter_by(user_id=me.id).order_by(Post.created_at.desc()).limit(50).all()
     post_ids = [p.id for p in posts]
-    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me.id)
+    like_map, cmt_map, liked_ids, reposted_ids = _batch_post_counts(post_ids, me.id)
     return jsonify([
         serialize_post(p, me.id,
                        like_count=like_map.get(p.id, 0),
                        comment_count=cmt_map.get(p.id, 0),
-                       liked=(p.id in liked_ids))
+                       liked=(p.id in liked_ids),
+                       reposted=(p.id in reposted_ids))
         for p in posts
     ])
 
@@ -2656,6 +2874,7 @@ def user_profile(uid):
                            following_count=following_count, is_following=is_following,
                            avatar=user_avatar(target))
 
+# ── SINGLE definition of api_user_posts (the duplicate has been removed) ──
 @app.route('/api/user/<int:uid>/posts')
 @verified_required
 def api_user_posts(uid):
@@ -2664,12 +2883,13 @@ def api_user_posts(uid):
         .filter_by(user_id=uid, anonymous=False)\
         .order_by(Post.created_at.desc()).limit(50).all()
     post_ids = [p.id for p in posts]
-    like_map, cmt_map, liked_ids = _batch_post_counts(post_ids, me)
+    like_map, cmt_map, liked_ids, reposted_ids = _batch_post_counts(post_ids, me)
     return jsonify([
         serialize_post(p, me,
                        like_count=like_map.get(p.id, 0),
                        comment_count=cmt_map.get(p.id, 0),
-                       liked=(p.id in liked_ids))
+                       liked=(p.id in liked_ids),
+                       reposted=(p.id in reposted_ids))
         for p in posts
     ])
 
@@ -3106,7 +3326,7 @@ def api_debug_users():
     } for u2 in users])
 
 @app.route('/api/debug/supabase')
-@login_required
+@session_login_required
 def debug_supabase():
     result = {
         'env_url_set': bool(SUPABASE_URL),
@@ -3135,7 +3355,7 @@ def debug_supabase():
     return jsonify(result)
 
 @app.route('/api/debug/cloudinary')
-@login_required
+@session_login_required
 def debug_cloudinary():
     import cloudinary.api
     result = {

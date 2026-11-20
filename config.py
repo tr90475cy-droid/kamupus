@@ -32,7 +32,7 @@ def normalize_db_url(url):
 class Config:
     SECRET_KEY = env_or('SECRET_KEY', 'fundar-dev-secret-change-in-prod')
 
-    # Database — plain postgresql://, psycopg2 default driver
+    # ── Database ──
     db_url = env_or('DATABASE_URL', '')
     if db_url:
         SQLALCHEMY_DATABASE_URI = normalize_db_url(db_url)
@@ -47,23 +47,32 @@ class Config:
         'pool_recycle': 300,
     }
 
-    # Uploads
+    # ── Uploads ──
     UPLOAD_FOLDER = env_or('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))
 
-    # ── CHANGED ──
-    # Must be > 50 MB (video cap) + a buffer for multipart overhead.
-    # 60 MB gives ~10 MB headroom for form fields, boundary bytes,
-    # and the extra envelope that browsers add on multipart POSTs.
+    # Must be > 50 MB (video cap) + buffer for multipart overhead.
     MAX_CONTENT_LENGTH = 60 * 1024 * 1024
-
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'pdf'}
 
-    # Admin
+    # ── Admin ──
     ADMIN_PATH = env_or('ADMIN_PATH', '/admin')
     ADMIN_KEY = env_or('ADMIN_KEY', 'kamupus-admin-2026')
     ADMIN_SESSION_MINUTES = int(env_or('ADMIN_SESSION_MINUTES', '30'))
 
-    # Sessions
+    # ── Sessions ──
     PERMANENT_SESSION_LIFETIME = timedelta(days=365)
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
+
+    # ── Password reset ──
+    PASSWORD_RESET_TOKEN_MINUTES      = int(env_or('PASSWORD_RESET_TOKEN_MINUTES', '30'))
+    PASSWORD_RESET_RATE_LIMIT_MINUTES = int(env_or('PASSWORD_RESET_RATE_LIMIT_MINUTES', '5'))
+    APP_BASE_URL                      = env_or('APP_BASE_URL', '')
+
+    # ── SMTP ──
+    SMTP_HOST     = env_or('SMTP_HOST', '')
+    SMTP_PORT     = int(env_or('SMTP_PORT', '587'))
+    SMTP_USER     = env_or('SMTP_USER', '')
+    SMTP_PASSWORD = env_or('SMTP_PASSWORD', '')
+    SMTP_FROM     = env_or('SMTP_FROM', 'no-reply@kamupus.com')
+    SMTP_USE_TLS  = env_or('SMTP_USE_TLS', 'true').lower() == 'true'
