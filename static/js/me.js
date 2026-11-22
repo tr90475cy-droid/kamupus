@@ -17,6 +17,7 @@
     followers: document.getElementById('panelFollowers'),
     following: document.getElementById('panelFollowing'),
   };
+  const loadedTabs = { posts: false, videos: false, followers: false, following: false };
 
   // Edit modal
   const editBtn   = document.getElementById('editProfileBtn');
@@ -55,6 +56,7 @@
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[m]));
   }
+
   function fmtCount(n) {
     n = Number(n) || 0;
     if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
@@ -62,17 +64,29 @@
     return String(n);
   }
 
+  function agoLabel(t) {
+    if (!t) return 'now';
+    return t === 'now' ? 'now' : t + ' ago';
+  }
+
+  async function fetchJson(url, opts) {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
   // ── POSTS ──
   async function loadPosts() {
+    if (!postsEl) return;
     postsEl.innerHTML = '<div class="empty">Loading…</div>';
     try {
-      const r = await fetch('/api/me/posts');
-      const posts = await r.json();
-      if (!posts.length) {
+      const posts = await fetchJson('/api/me/posts');
+      if (!Array.isArray(posts) || !posts.length) {
         postsEl.innerHTML = '<div class="empty">You haven\'t posted yet.</div>';
         return;
       }
       postsEl.innerHTML = posts.map(postHtml).join('');
+      loadedTabs.posts = true;
     } catch {
       postsEl.innerHTML = '<div class="empty">Could not load posts.</div>';
     }
@@ -85,6 +99,10 @@
           ? `<img class="avatar" src="${esc(p.avatar)}" alt="">`
           : `<div class="avatar avatar-blank"></div>`);
 
+    const verifiedBadge = p.anonymous
+      ? '<span class="badge-anon">ANON</span>'
+      : (p.verified ? '<span class="verified">✓</span>' : '');
+
     return `
       <article class="post ${p.anonymous ? 'anon' : ''}">
         <div class="post-head">
@@ -92,16 +110,16 @@
           <div class="post-meta">
             <div class="post-name-row">
               <span class="post-name">${esc(p.author)}</span>
-              ${p.anonymous ? '<span class="badge-anon">ANON</span>' : (p.verified ? '<span class="verified">✓</span>' : '')}
+              ${verifiedBadge}
             </div>
-            <div class="post-time">${esc(p.time)} ago</div>
+            <div class="post-time">${esc(agoLabel(p.time))}</div>
           </div>
         </div>
         <p class="post-body">${esc(p.content)}</p>
         ${p.image ? `<img class="post-img" src="${esc(p.image)}" alt="">` : ''}
         <div class="post-actions">
-          <div class="act">❤️ <span>${p.likes}</span></div>
-          <div class="act">💬 <span>${p.comments}</span></div>
+          <div class="act">❤️ <span>${fmtCount(p.likes)}</span></div>
+          <div class="act">💬 <span>${fmtCount(p.comments)}</span></div>
         </div>
       </article>
     `;
@@ -109,16 +127,18 @@
 
   // ── VIDEOS GRID ──
   async function loadVideos() {
+    if (!videosEl) return;
     videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">Loading…</div>';
     try {
-      const r = await fetch('/api/me/videos');
-      const videos = await r.json();
-      videosCount.textContent = videos.length;
+      const videos = await fetchJson('/api/me/videos');
+      if (!Array.isArray(videos)) throw new Error('bad payload');
+      if (videosCount) videosCount.textContent = videos.length;
       if (!videos.length) {
         videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">You haven\'t uploaded any videos yet. Tap the + in the video feed to post your first one.</div>';
         return;
       }
       videosEl.innerHTML = videos.map(videoThumbHtml).join('');
+      loadedTabs.videos = true;
     } catch {
       videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">Could not load videos.</div>';
     }
@@ -148,26 +168,34 @@
   }
 
   // Click thumbnail → preview modal
-  videosEl.addEventListener('click', (e) => {
-    const likersBtn = e.target.closest('[data-likers]');
-    if (likersBtn) {
-      e.stopPropagation();
-      openLikers(Number(likersBtn.dataset.likers));
-      return;
-    }
-    const thumb = e.target.closest('.video-thumb');
-    if (!thumb) return;
-    previewPlayer.src = thumb.dataset.vurl;
-    previewMeta.textContent = thumb.dataset.vcaption || '';
-    previewModal.classList.add('open');
-    previewPlayer.play().catch(() => {});
-  });
+  if (videosEl) {
+    videosEl.addEventListener('click', (e) => {
+      const likersBtn = e.target.closest('[data-likers]');
+      if (likersBtn) {
+        e.stopPropagation();
+        openLikers(Number(likersBtn.dataset.likers));
+        return;
+      }
+      const thumb = e.target.closest('.video-thumb');
+      if (!thumb || !previewModal || !previewPlayer) return;
+      previewPlayer.src = thumb.dataset.vurl;
+      if (previewMeta) previewMeta.textContent = thumb.dataset.vcaption || '';
+      previewModal.classList.add('open');
 
-  previewClose.addEventListener('click', closePreview);
-  previewModal.addEventListener('click', (e) => {
+      // Defer play() until after the modal has laid out, so autoplay isn't rejected.
+      requestAnimationFrame(() => {
+        const p = previewPlayer.play();
+        if (p && p.catch) p.catch(() => {});
+      });
+    });
+  }
+
+  if (previewClose) previewClose.addEventListener('click', closePreview);
+  if (previewModal) previewModal.addEventListener('click', (e) => {
     if (e.target === previewModal) closePreview();
   });
   function closePreview() {
+    if (!previewPlayer || !previewModal) return;
     previewPlayer.pause();
     previewPlayer.removeAttribute('src');
     previewPlayer.load();
@@ -176,12 +204,12 @@
 
   // ── LIKERS ──
   async function openLikers(vid) {
+    if (!likersModal || !likersList) return;
     likersList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>';
     likersModal.classList.add('open');
     try {
-      const r = await fetch('/api/videos/' + vid + '/likers');
-      const users = await r.json();
-      if (!users.length) {
+      const users = await fetchJson('/api/videos/' + vid + '/likers');
+      if (!Array.isArray(users) || !users.length) {
         likersList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">No likes yet.</div>';
         return;
       }
@@ -192,7 +220,7 @@
             : `<div class="liker-avatar"></div>`}
           <div class="liker-info">
             <div class="liker-name">${esc(u.name)}</div>
-            <div class="liker-time">${esc(u.time)} ago</div>
+            <div class="liker-time">${esc(agoLabel(u.time))}</div>
           </div>
         </a>
       `).join('');
@@ -201,35 +229,39 @@
     }
   }
 
-  likersClose.addEventListener('click', () => likersModal.classList.remove('open'));
-  likersModal.addEventListener('click', (e) => {
+  if (likersClose) likersClose.addEventListener('click', () => likersModal && likersModal.classList.remove('open'));
+  if (likersModal) likersModal.addEventListener('click', (e) => {
     if (e.target === likersModal) likersModal.classList.remove('open');
   });
 
   // ── FOLLOWERS / FOLLOWING ──
   async function loadFollowers() {
+    if (!followersList) return;
     followersList.innerHTML = '<div class="empty">Loading…</div>';
     try {
-      const r = await fetch('/api/me/followers');
-      const users = await r.json();
-      followersCount.textContent = users.length;
+      const users = await fetchJson('/api/me/followers');
+      if (!Array.isArray(users)) throw new Error('bad payload');
+      if (followersCount) followersCount.textContent = users.length;
       followersList.innerHTML = users.length
         ? users.map(u => userCard(u)).join('')
         : '<div class="empty">No followers yet. Post often to get noticed!</div>';
+      loadedTabs.followers = true;
     } catch {
       followersList.innerHTML = '<div class="empty">Could not load followers.</div>';
     }
   }
 
   async function loadFollowing() {
+    if (!followingList) return;
     followingList.innerHTML = '<div class="empty">Loading…</div>';
     try {
-      const r = await fetch('/api/me/following');
-      const users = await r.json();
-      followingCount.textContent = users.length;
+      const users = await fetchJson('/api/me/following');
+      if (!Array.isArray(users)) throw new Error('bad payload');
+      if (followingCount) followingCount.textContent = users.length;
       followingList.innerHTML = users.length
         ? users.map(u => userCard(u)).join('')
         : '<div class="empty">You aren\'t following anyone yet. Tap "Find friends".</div>';
+      loadedTabs.following = true;
     } catch {
       followingList.innerHTML = '<div class="empty">Could not load following.</div>';
     }
@@ -255,60 +287,79 @@
     `;
   }
 
+  // Message button → open DM room then navigate. Read the response so
+  // errors (unverified target, self-DM) don't silently redirect the user.
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-action="message"]');
     if (!btn) return;
     const uid = btn.dataset.uid;
-    await fetch('/api/chat/dm/' + uid, { method: 'POST' });
-    window.location.href = '/chat?dm=' + uid;
+    try {
+      const data = await fetchJson('/api/chat/dm/' + uid, { method: 'POST' });
+      if (data && data.id) {
+        window.location.href = '/chat?dm=' + uid + '&room=' + data.id;
+      } else {
+        window.location.href = '/chat?dm=' + uid;
+      }
+    } catch (err) {
+      console.warn('DM open failed:', err);
+      window.location.href = '/chat?dm=' + uid;
+    }
   });
 
   // ── TABS ──
-  tabsEl.addEventListener('click', (e) => {
-    const chip = e.target.closest('.chip');
-    if (!chip) return;
-    tabsEl.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-    chip.classList.add('active');
+  if (tabsEl) {
+    tabsEl.addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if (!chip) return;
+      tabsEl.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
 
-    const tab = chip.dataset.tab;
-    Object.entries(panels).forEach(([k, el]) => {
-      if (!el) return;
-      el.classList.toggle('hidden', k !== tab);
+      const tab = chip.dataset.tab;
+      Object.entries(panels).forEach(([k, el]) => {
+        if (!el) return;
+        el.classList.toggle('hidden', k !== tab);
+      });
+
+      if (tab === 'posts')         { if (!loadedTabs.posts)     loadPosts(); }
+      else if (tab === 'videos')   { if (!loadedTabs.videos)    loadVideos(); }
+      else if (tab === 'followers'){ if (!loadedTabs.followers) loadFollowers(); }
+      else if (tab === 'following'){ if (!loadedTabs.following) loadFollowing(); }
     });
-
-    if (tab === 'posts') loadPosts();
-    else if (tab === 'videos') loadVideos();
-    else if (tab === 'followers') loadFollowers();
-    else if (tab === 'following') loadFollowing();
-  });
+  }
 
   // ── EDIT PROFILE ──
-  editBtn.addEventListener('click', () => {
-    editModal.classList.add('open');
-    document.body.style.overflow = 'hidden';
-  });
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      editModal.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    });
+  }
   function closeEdit() {
+    if (!editModal) return;
     editModal.classList.remove('open');
     document.body.style.overflow = '';
   }
-  editClose.addEventListener('click', closeEdit);
-  editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEdit(); });
+  if (editClose) editClose.addEventListener('click', closeEdit);
+  if (editModal) editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEdit(); });
 
-  editSave.addEventListener('click', async () => {
-    editSave.disabled = true;
-    try {
-      const r = await fetch('/api/me', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ full_name: editName.value, bio: editBio.value })
-      });
-      const data = await r.json();
-      if (data.ok) {
-        bioEl.textContent = data.bio || 'No bio yet.';
-        closeEdit();
-      }
-    } finally { editSave.disabled = false; }
-  });
+  if (editSave) {
+    editSave.addEventListener('click', async () => {
+      editSave.disabled = true;
+      try {
+        const data = await fetchJson('/api/me', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ full_name: editName.value, bio: editBio.value })
+        });
+        if (data && data.ok) {
+          if (bioEl) bioEl.textContent = data.bio || 'No bio yet.';
+          closeEdit();
+        }
+      } catch {
+        alert('Could not save profile. Please try again.');
+      } finally { editSave.disabled = false; }
+    });
+  }
 
   // ── AVATAR ──
   if (avatarFile) {
@@ -339,10 +390,10 @@
 
   // ── NOTIFICATIONS ──
   async function refreshNotifBadge() {
+    if (!notifBadge) return;                  // ← guard: some pages may not have a bell
     try {
-      const r = await fetch('/api/notifications/unread-count');
-      const d = await r.json();
-      if (d.count > 0) {
+      const d = await fetchJson('/api/notifications/unread-count');
+      if (d && d.count > 0) {
         notifBadge.textContent = d.count > 99 ? '99+' : d.count;
         notifBadge.classList.add('on');
       } else {
@@ -352,17 +403,16 @@
   }
 
   async function openNotifs() {
+    if (!notifModal || !notifList) return;
     notifList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">Loading…</div>';
     notifModal.classList.add('open');
     try {
-      const r = await fetch('/api/notifications');
-      const items = await r.json();
-      if (!items.length) {
+      const items = await fetchJson('/api/notifications');
+      if (!Array.isArray(items) || !items.length) {
         notifList.innerHTML = '<div class="empty" style="padding:32px;text-align:center;color:#9ca3af;">No notifications yet.</div>';
       } else {
         notifList.innerHTML = items.map(notifHtml).join('');
       }
-      // mark read
       fetch('/api/notifications/read', { method: 'POST' })
         .then(() => refreshNotifBadge())
         .catch(() => {});
@@ -398,15 +448,15 @@
             <strong>${esc(n.actor)}</strong> ${verb}
             ${n.preview ? ` <span style="color:#6b7280;">"${esc(n.preview.slice(0, 50))}"</span>` : ''}
           </div>
-          <div class="notif-time">${esc(n.time)} ago · ${icon}</div>
+          <div class="notif-time">${esc(agoLabel(n.time))} · ${icon}</div>
         </div>
       </div>
     `;
   }
 
-  notifBell.addEventListener('click', openNotifs);
-  notifClose.addEventListener('click', () => notifModal.classList.remove('open'));
-  notifModal.addEventListener('click', (e) => {
+  if (notifBell)  notifBell.addEventListener('click', openNotifs);
+  if (notifClose) notifClose.addEventListener('click', () => notifModal && notifModal.classList.remove('open'));
+  if (notifModal) notifModal.addEventListener('click', (e) => {
     if (e.target === notifModal) notifModal.classList.remove('open');
   });
 
@@ -416,6 +466,5 @@
   loadFollowers();
   loadFollowing();
   refreshNotifBadge();
-  setInterval(refreshNotifBadge, 30000);  // poll every 30s
-
+  setInterval(refreshNotifBadge, 30000);
 })();
