@@ -425,3 +425,21 @@ class PasswordResetToken(db.Model):
     used_at      = db.Column(db.DateTime)
     requested_ip = db.Column(db.String(45))
     created_at   = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+class UserBlock(db.Model):
+    __tablename__ = 'user_blocks'
+    id = db.Column(db.Integer, primary_key=True)
+    blocker_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    blocked_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class UserReport(db.Model):
+    __tablename__ = 'user_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    reported_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    reason = db.Column(db.String(200), nullable=False)
+    context = db.Column(db.String(500))
+    room_id = db.Column(db.Integer)
+    status = db.Column(db.String(20), default='pending')   # pending / reviewed / dismissed
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

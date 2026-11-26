@@ -1113,7 +1113,7 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
   transition: transform .15s;
 }
 .listing-promote-btn:hover { transform: scale(1.02); }
-}
+
 /* Hide text longer than 5 lines by default */
 .post-body {
   display: -webkit-box;
@@ -1365,3 +1365,16 @@ h1 em, h2 em, h3 em { font-style: italic; color: var(--primary); font-weight: 80
 /* Clickable links in messages */
 .msg-content a { color: inherit; text-decoration: underline; word-break: break-all; }
 .msg.mine .msg-content a { color: #22252D; }
+
+.guidelines-page {
+  max-width: 720px;
+  margin: 2rem auto;
+  padding: 0 1.25rem;
+  line-height: 1.7;
+  color: #1a1a1a;
+}
+.guidelines-page h1 { font-size: 2rem; margin-bottom: .5rem; }
+.guidelines-page h2 { font-size: 1.15rem; margin-top: 2rem; color: #111; }
+.guidelines-page p, .guidelines-page li { color: #333; font-size: .95rem; }
+.guidelines-intro { font-size: 1rem; color: #555; }
+.guidelines-footer { margin-top: 2.5rem; font-size: .85rem; color: #888; }

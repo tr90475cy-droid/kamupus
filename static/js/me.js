@@ -69,9 +69,16 @@
     return t === 'now' ? 'now' : t + ' ago';
   }
 
+  // FIX #1: attach error body to the thrown error so callers can show real messages
   async function fetchJson(url, opts) {
     const r = await fetch(url, opts);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      const err = new Error(body.error || 'HTTP ' + r.status);
+      err.status = r.status;
+      err.body = body;
+      throw err;
+    }
     return r.json();
   }
 
@@ -135,6 +142,7 @@
       if (videosCount) videosCount.textContent = videos.length;
       if (!videos.length) {
         videosEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">You haven\'t uploaded any videos yet. Tap the + in the video feed to post your first one.</div>';
+        loadedTabs.videos = true;
         return;
       }
       videosEl.innerHTML = videos.map(videoThumbHtml).join('');
@@ -167,7 +175,6 @@
     `;
   }
 
-  // Click thumbnail → preview modal
   if (videosEl) {
     videosEl.addEventListener('click', (e) => {
       const likersBtn = e.target.closest('[data-likers]');
@@ -182,7 +189,6 @@
       if (previewMeta) previewMeta.textContent = thumb.dataset.vcaption || '';
       previewModal.classList.add('open');
 
-      // Defer play() until after the modal has laid out, so autoplay isn't rejected.
       requestAnimationFrame(() => {
         const p = previewPlayer.play();
         if (p && p.catch) p.catch(() => {});
@@ -287,22 +293,25 @@
     `;
   }
 
-  // Message button → open DM room then navigate. Read the response so
-  // errors (unverified target, self-DM) don't silently redirect the user.
+  // FIX #1 + #3: handle both {id} and {room:{id}} shapes; surface 403 errors
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-action="message"]');
     if (!btn) return;
     const uid = btn.dataset.uid;
+    btn.disabled = true;
     try {
       const data = await fetchJson('/api/chat/dm/' + uid, { method: 'POST' });
-      if (data && data.id) {
-        window.location.href = '/chat?dm=' + uid + '&room=' + data.id;
+      const room = data?.room || data;
+      if (room && room.id) {
+        window.location.href = '/chat?room=' + room.id;
       } else {
         window.location.href = '/chat?dm=' + uid;
       }
     } catch (err) {
-      console.warn('DM open failed:', err);
-      window.location.href = '/chat?dm=' + uid;
+      // Real backend message (e.g. "Cannot start a conversation with this user.")
+      alert(err.body?.error || err.message || 'Could not start chat.');
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -328,7 +337,7 @@
   }
 
   // ── EDIT PROFILE ──
-  if (editBtn) {
+  if (editBtn && editModal) {
     editBtn.addEventListener('click', () => {
       editModal.classList.add('open');
       document.body.style.overflow = 'hidden';
@@ -355,8 +364,8 @@
           if (bioEl) bioEl.textContent = data.bio || 'No bio yet.';
           closeEdit();
         }
-      } catch {
-        alert('Could not save profile. Please try again.');
+      } catch (err) {
+        alert(err.body?.error || 'Could not save profile. Please try again.');
       } finally { editSave.disabled = false; }
     });
   }
@@ -390,7 +399,7 @@
 
   // ── NOTIFICATIONS ──
   async function refreshNotifBadge() {
-    if (!notifBadge) return;                  // ← guard: some pages may not have a bell
+    if (!notifBadge) return;
     try {
       const d = await fetchJson('/api/notifications/unread-count');
       if (d && d.count > 0) {
@@ -461,10 +470,9 @@
   });
 
   // ── INIT ──
+  // FIX #2: only the default visible tab loads eagerly.
+  // Videos/followers/following load when their chip is clicked.
   loadPosts();
-  loadVideos();
-  loadFollowers();
-  loadFollowing();
   refreshNotifBadge();
   setInterval(refreshNotifBadge, 30000);
 })();

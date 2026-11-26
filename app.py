@@ -2,24 +2,27 @@ import eventlet
 eventlet.monkey_patch()
 
 import os
-import io 
+import io
 import time
 import uuid
 import json
+import hmac
+import logging
 import requests
 import threading
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
+import cloudinary.utils
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import render_template
+from urllib.parse import urlparse
 import secrets
 import hashlib
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from sqlalchemy import text
+from profanity import contains_bullying, censor
 
 
 _online_lock = threading.Lock()
@@ -45,10 +48,51 @@ from models import (db, User, StudentVerification, Post, Like, Comment,
                     PastQuestion,
                     VideoPost, VideoLike, VideoComment, VideoSave,
                     VideoReport, PostRepost, VideoRepost, VideoTag,
-                    Notification, PasswordResetToken)
+                    Notification, PasswordResetToken,
+                    UserBlock, UserReport)          # FIX: these two were never imported
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func, text
 from werkzeug.exceptions import RequestEntityTooLarge
+
+
+# ─────────────────────────────────────────────
+# CONFIG CONSTANTS (defined first so everything below can use them)
+# ─────────────────────────────────────────────
+PASSWORD_RESET_TOKEN_MINUTES      = int(os.environ.get('PASSWORD_RESET_TOKEN_MINUTES', '30'))
+PASSWORD_RESET_RATE_LIMIT_MINUTES = int(os.environ.get('PASSWORD_RESET_RATE_LIMIT_MINUTES', '5'))
+APP_BASE_URL                      = os.environ.get('APP_BASE_URL', '').rstrip('/')
+
+SMTP_HOST     = os.environ.get('SMTP_HOST', '')
+SMTP_PORT     = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER     = os.environ.get('SMTP_USER', '')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+SMTP_FROM     = os.environ.get('SMTP_FROM', 'no-reply@kamupus.com')
+SMTP_USE_TLS  = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
+
+IS_DEV = os.environ.get('FLASK_ENV') == 'development'
+
+
+def _build_allowed_origins():
+    """Origins allowed for Socket.IO and for the CSRF origin check."""
+    origins = {
+        'https://kamupus.com',
+        'https://www.kamupus.com',
+        'https://app.kamupus.com',
+    }
+    if APP_BASE_URL:
+        origins.add(APP_BASE_URL)
+    for o in os.environ.get('ALLOWED_ORIGINS', '').split(','):
+        o = o.strip().rstrip('/')
+        if o:
+            origins.add(o)
+    if IS_DEV:
+        port = os.environ.get('PORT', '5000')
+        origins.add(f'http://localhost:{port}')
+        origins.add(f'http://127.0.0.1:{port}')
+    return sorted(origins)
+
+
+ALLOWED_ORIGINS = _build_allowed_origins()
 
 
 # ─────────────────────────────────────────────
@@ -57,15 +101,20 @@ from werkzeug.exceptions import RequestEntityTooLarge
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '') or os.environ.get('SUPABASE_KEY', '')
 SUPABASE_BUCKET = os.environ.get('SUPABASE_BUCKET', 'uploads')
+# FIX: private bucket for sensitive documents (admission letters).
+# Create a PRIVATE bucket in Supabase and set this env var.
+SUPABASE_PRIVATE_BUCKET = os.environ.get('SUPABASE_PRIVATE_BUCKET', '')
 
 _last_upload_error = None
 
 if SUPABASE_URL and SUPABASE_KEY:
     print('✓ Supabase Storage configured (via direct HTTPS API)')
+    if not SUPABASE_PRIVATE_BUCKET:
+        print('⚠ SUPABASE_PRIVATE_BUCKET not set — admission letters will be stored in the PUBLIC bucket')
 else:
     print('⚠ SUPABASE_URL/SUPABASE_SERVICE_KEY not set — uploads disabled')
 
-    # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # CLOUDINARY
 # ─────────────────────────────────────────────
 cloudinary.config(
@@ -85,6 +134,14 @@ else:
 # ─────────────────────────────────────────────
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# FIX: safer session cookies (also blunts CSRF)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=APP_BASE_URL.startswith('https'),
+)
+
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 db.init_app(app)
 
@@ -108,14 +165,13 @@ else:
 # ─────────────────────────────────────────────
 socketio = SocketIO(
     app,
-    cors_allowed_origins='*',
+    cors_allowed_origins=ALLOWED_ORIGINS,      # FIX: was '*'
     async_mode='eventlet',
     ping_interval=25,
     ping_timeout=60,
     max_http_buffer_size=1_000_000,
 )
 
-import logging
 
 class _DropDisconnectedSession(logging.Filter):
     def filter(self, record):
@@ -127,6 +183,33 @@ class _DropDisconnectedSession(logging.Filter):
 for _name in ('gunicorn.error', 'gunicorn.access',
               'engineio', 'socketio', 'werkzeug'):
     logging.getLogger(_name).addFilter(_DropDisconnectedSession())
+
+# ─────────────────────────────────────────────
+# CSRF PROTECTION (origin check for state-changing requests)
+# ─────────────────────────────────────────────
+_CSRF_EXEMPT_PATHS = ('/flutterwave/webhook', '/cloudinary/webhook')
+
+@app.before_request
+def _csrf_origin_check():
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return
+    if request.path in _CSRF_EXEMPT_PATHS or request.path.startswith('/socket.io'):
+        return
+
+    origin = (request.headers.get('Origin') or '').rstrip('/')
+    if not origin:
+        ref = request.headers.get('Referer') or ''
+        if ref:
+            p = urlparse(ref)
+            origin = f'{p.scheme}://{p.netloc}'
+    if not origin:
+        return  # non-browser client; session cookie is SameSite=Lax anyway
+
+    if origin in ALLOWED_ORIGINS or urlparse(origin).netloc == request.host:
+        return
+
+    print(f'🚫 [CSRF] blocked {request.method} {request.path} from origin {origin}')
+    abort(403)
 
 # ─────────────────────────────────────────────
 # AD PRICING
@@ -173,12 +256,24 @@ def current_user():
     uid = session.get('user_id')
     return db.session.get(User, uid) if uid else None
 
+def client_ip():
+    """Best-effort client IP behind a proxy (last X-Forwarded-For hop = what our proxy saw)."""
+    xff = request.headers.get('X-Forwarded-For', '')
+    if xff:
+        return xff.split(',')[-1].strip()
+    return request.remote_addr or ''
+
 def get_file_url(path):
     if not path:
         return None
     if path.startswith('http'):
         return path
+    if path.startswith('private:'):
+        return url_for('private_file', key=path[len('private:'):])
     return url_for('uploaded_file', filename=path)
+
+# Use {{ file_url(path) }} in templates instead of url_for('uploaded_file', filename=path)
+app.jinja_env.globals['file_url'] = get_file_url
 
 def user_avatar(user):
     if not user:
@@ -207,18 +302,48 @@ def verified_required(f):
 
 def _recent_reset_exists(user_id, minutes=None):
     if minutes is None:
-        minutes = app.config.get('PASSWORD_RESET_RATE_LIMIT_MINUTES', 5)
+        minutes = PASSWORD_RESET_RATE_LIMIT_MINUTES
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
     return PasswordResetToken.query.filter(
         PasswordResetToken.user_id == user_id,
         PasswordResetToken.created_at > cutoff,
     ).first() is not None
 
+def _log_blocked(user_id, surface, content):
+    print(f'🚫 [FILTER] user {user_id} blocked on {surface}: {(content or "")[:80]}')
+
+# ── Block helpers ──
+def _blocked_ids(me_id):
+    """IDs of users who are blocked by me OR who have blocked me."""
+    rows = UserBlock.query.filter(
+        db.or_(UserBlock.blocker_id == me_id, UserBlock.blocked_id == me_id)
+    ).all()
+    return {b.blocked_id if b.blocker_id == me_id else b.blocker_id for b in rows}
+
+def _is_blocked_between(a, b):
+    return UserBlock.query.filter(
+        db.or_(
+            db.and_(UserBlock.blocker_id == a, UserBlock.blocked_id == b),
+            db.and_(UserBlock.blocker_id == b, UserBlock.blocked_id == a),
+        )
+    ).first() is not None
+
+def _dm_blocked_for(room, me_id):
+    """True if `room` is a DM and either side has blocked the other."""
+    if room.is_group:
+        return False
+    other = next((m for m in room.members if m.user_id != me_id), None)
+    return bool(other and _is_blocked_between(me_id, other.user_id))
+
 # ─────────────────────────────────────────────
 # SUPABASE UPLOAD & DELETE
 # ─────────────────────────────────────────────
-def save_upload(file, prefix):
-    """Upload to Supabase Storage via direct HTTPS API."""
+def save_upload(file, prefix, private=False):
+    """Upload to Supabase Storage via direct HTTPS API.
+
+    private=True stores the file in SUPABASE_PRIVATE_BUCKET (if configured) and
+    returns 'private:<key>' instead of a public URL.
+    """
     global _last_upload_error
     _last_upload_error = None
 
@@ -226,6 +351,9 @@ def save_upload(file, prefix):
         _last_upload_error = 'Supabase not configured (SUPABASE_URL/SUPABASE_SERVICE_KEY missing)'
         print(f'❌ [UPLOAD] {_last_upload_error}')
         return None
+
+    use_private = bool(private and SUPABASE_PRIVATE_BUCKET)
+    bucket = SUPABASE_PRIVATE_BUCKET if use_private else SUPABASE_BUCKET
 
     content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
     ext = os.path.splitext(file.filename or '')[1].lower() or '.bin'
@@ -245,7 +373,7 @@ def save_upload(file, prefix):
 
     try:
         base = SUPABASE_URL.rstrip('/')
-        upload_url = f'{base}/storage/v1/object/{SUPABASE_BUCKET}/{unique_name}'
+        upload_url = f'{base}/storage/v1/object/{bucket}/{unique_name}'
 
         res = requests.post(
             upload_url,
@@ -263,7 +391,11 @@ def save_upload(file, prefix):
             print(f'❌ [SUPABASE UPLOAD] {_last_upload_error}')
             return None
 
-        public_url = f'{base}/storage/v1/object/public/{SUPABASE_BUCKET}/{unique_name}'
+        if use_private:
+            print(f'✓ [UPLOAD] (private) {unique_name}')
+            return f'private:{unique_name}'
+
+        public_url = f'{base}/storage/v1/object/public/{bucket}/{unique_name}'
         print(f'✓ [UPLOAD] {unique_name} → {public_url[:60]}...')
         return public_url
 
@@ -273,19 +405,55 @@ def save_upload(file, prefix):
         return None
 
 
+def _signed_private_url(key, expires=120):
+    """Short-lived signed URL for a file in the private bucket."""
+    if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_PRIVATE_BUCKET:
+        return None
+    try:
+        base = SUPABASE_URL.rstrip('/')
+        res = requests.post(
+            f'{base}/storage/v1/object/sign/{SUPABASE_PRIVATE_BUCKET}/{key}',
+            headers={'Authorization': f'Bearer {SUPABASE_KEY}',
+                     'Content-Type': 'application/json'},
+            json={'expiresIn': expires},
+            timeout=15,
+        )
+        if res.status_code >= 400:
+            print(f'⚠ [SIGN] HTTP {res.status_code}: {res.text[:100]}')
+            return None
+        signed = res.json().get('signedURL') or ''
+        if not signed:
+            return None
+        return f'{base}/storage/v1{signed}' if signed.startswith('/') else signed
+    except Exception as e:
+        print(f'⚠ [SIGN EXCEPTION] {type(e).__name__}: {e}')
+        return None
+
+
 def delete_upload(path):
     """Delete a file from Supabase Storage via direct HTTPS API."""
     if not path or not SUPABASE_URL or not SUPABASE_KEY:
         return
-    if not isinstance(path, str) or not path.startswith('http'):
+    if not isinstance(path, str):
         return
-    try:
+
+    bucket = None
+    key = None
+    if path.startswith('private:') and SUPABASE_PRIVATE_BUCKET:
+        bucket = SUPABASE_PRIVATE_BUCKET
+        key = path[len('private:'):]
+    elif path.startswith('http'):
         marker = f'/public/{SUPABASE_BUCKET}/'
         if marker not in path:
             return
+        bucket = SUPABASE_BUCKET
         key = path.split(marker, 1)[1]
+    else:
+        return
+
+    try:
         base = SUPABASE_URL.rstrip('/')
-        delete_url = f'{base}/storage/v1/object/{SUPABASE_BUCKET}/{key}'
+        delete_url = f'{base}/storage/v1/object/{bucket}/{key}'
 
         res = requests.delete(
             delete_url,
@@ -374,14 +542,18 @@ def _notify(user_id, actor_id, type_, target_type=None, target_id=None, preview=
         print(f'⚠ notify failed: {e}')
 
 def _send_password_reset_email(to_email, reset_url):
-    """Return (ok, error). If SMTP not configured, prints link and returns True."""
+    """Return (ok, error)."""
     if not SMTP_HOST or not SMTP_USER:
-        print('\n' + '=' * 60)
-        print('PASSWORD RESET (SMTP not configured — dev mode)')
-        print(f'  To:   {to_email}')
-        print(f'  Link: {reset_url}')
-        print('=' * 60 + '\n')
-        return True, None
+        # FIX: only print the reset link in local development
+        if IS_DEV:
+            print('\n' + '=' * 60)
+            print('PASSWORD RESET (SMTP not configured — dev mode)')
+            print(f'  To:   {to_email}')
+            print(f'  Link: {reset_url}')
+            print('=' * 60 + '\n')
+            return True, None
+        print('⚠ [RESET EMAIL] SMTP not configured — cannot send reset email')
+        return False, 'SMTP not configured'
 
     try:
         msg = MIMEMultipart('alternative')
@@ -391,7 +563,7 @@ def _send_password_reset_email(to_email, reset_url):
 
         minutes = PASSWORD_RESET_TOKEN_MINUTES
 
-        text = (
+        plain = (
             f"Hi,\n\n"
             f"Someone requested a password reset for this KAMUPUS account.\n"
             f"Open the link below within {minutes} minutes to set a new password:\n\n"
@@ -420,7 +592,7 @@ def _send_password_reset_email(to_email, reset_url):
           </p>
         </div>"""
 
-        msg.attach(MIMEText(text, 'plain'))
+        msg.attach(MIMEText(plain, 'plain'))
         msg.attach(MIMEText(html,  'html'))
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
@@ -456,7 +628,7 @@ def log_admin_action(action, target_user_id=None, detail=''):
         return
     log = AdminAction(
         admin_id=u.id, action=action, target_user_id=target_user_id,
-        target_detail=(detail or '')[:255], ip_address=request.remote_addr or '',
+        target_detail=(detail or '')[:255], ip_address=client_ip(),
     )
     db.session.add(log)
     db.session.commit()
@@ -472,6 +644,52 @@ def is_admin_unlocked():
         session.pop('admin_last_seen', None)
         return False
     return True
+
+# ── Admin login brute-force protection (in-memory, per IP) ──
+_ADMIN_FAIL_LIMIT = 5
+_ADMIN_FAIL_WINDOW = 15 * 60
+_admin_fail_lock = threading.Lock()
+_admin_fails = {}   # ip -> [timestamps]
+
+def _admin_rate_limited(ip):
+    now = time.time()
+    with _admin_fail_lock:
+        attempts = [t for t in _admin_fails.get(ip, []) if now - t < _ADMIN_FAIL_WINDOW]
+        _admin_fails[ip] = attempts
+        return len(attempts) >= _ADMIN_FAIL_LIMIT
+
+def _admin_record_fail(ip):
+    with _admin_fail_lock:
+        _admin_fails.setdefault(ip, []).append(time.time())
+
+def _admin_clear_fails(ip):
+    with _admin_fail_lock:
+        _admin_fails.pop(ip, None)
+
+def _admin_guard():
+    """Return None if the admin may proceed, else a response to return."""
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    touch_admin_session()
+    return None
+
+# ─────────────────────────────────────────────
+# PRIVATE FILES (admin only, short-lived signed URL)
+# ─────────────────────────────────────────────
+@app.route('/private-file/<path:key>')
+def private_file(key):
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+    if not is_admin_unlocked():
+        return redirect(url_for('admin_login'))
+    signed = _signed_private_url(key)
+    if not signed:
+        abort(404)
+    return redirect(signed)
 
 # ─────────────────────────────────────────────
 # HEALTH
@@ -609,7 +827,7 @@ def forgot_password():
                 raw_token  = secrets.token_urlsafe(32)
                 token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
                 expires_at = datetime.utcnow() + timedelta(
-                    minutes=app.config['PASSWORD_RESET_TOKEN_MINUTES'])
+                    minutes=PASSWORD_RESET_TOKEN_MINUTES)
 
                 # Invalidate any previous unused tokens for this user
                 PasswordResetToken.query.filter_by(
@@ -621,11 +839,11 @@ def forgot_password():
                     user_id=user.id,
                     token_hash=token_hash,
                     expires_at=expires_at,
-                    requested_ip=request.remote_addr or '',
+                    requested_ip=client_ip(),
                 ))
                 db.session.commit()
 
-                base = app.config.get('APP_BASE_URL') or request.host_url.rstrip('/')
+                base = APP_BASE_URL or request.host_url.rstrip('/')
                 reset_url = f"{base}{url_for('reset_password', token=raw_token)}"
 
                 ok, err = _send_password_reset_email(user.email, reset_url)
@@ -695,13 +913,10 @@ def reset_password(token):
 
         db.session.commit()
 
-        # Log them in directly (optional — remove if you prefer re-login)
+        # FIX: don't auto-login from an emailed link — make them sign in
         session.clear()
-        session['user_id']  = user.id
-        session.permanent   = True
-
-        flash('Password reset successful. You are now logged in.', 'success')
-        return redirect(url_for('index'))
+        flash('Password reset successful. Please sign in with your new password.', 'success')
+        return redirect(url_for('login'))
 
     return render_template('reset_password.html', token=token)
 
@@ -783,7 +998,8 @@ def verify():
                 return self._data
 
         tmp = _TmpFile(file.filename, file.content_type, file_bytes)
-        file_url = save_upload(tmp, f'verify{u.id}')
+        # FIX: admission letters go to the private bucket when configured
+        file_url = save_upload(tmp, f'verify{u.id}', private=True)
 
         if not file_url:
             flash(f'Upload failed — {_last_upload_error or "please try again"}', 'error')
@@ -824,6 +1040,10 @@ def pending():
 @verified_required
 def home():
     return render_template('home.html', user=current_user())
+
+@app.route('/community-guidelines')
+def community_guidelines():
+    return render_template('community_guidelines.html')
 
 # ─────────────────────────────────────────────
 # FEED
@@ -911,15 +1131,14 @@ def api_feed():
         .distinct().all()
     interest_tags = {t[0] for t in tag_rows if t[0]}
 
-    q = Post.query.options(joinedload(Post.author))
+    q = Post.query.options(joinedload(Post.author)).order_by(Post.created_at.desc())
     if f == 'anon':
         q = q.filter_by(anonymous=True)
     elif f in ('gist', 'parties', 'market', 'assign'):
         q = q.filter_by(tag=f)
 
-    posts = q.limit(30).all()
-    post_ids = [p.id for p in posts]
-    like_map, cmt_map, liked_ids, reposted_ids = _batch_post_counts(post_ids, me.id)
+    # FIX: score a bigger recent pool (200), THEN keep the top 30.
+    posts = q.limit(200).all()
 
     now = datetime.utcnow()
 
@@ -936,17 +1155,21 @@ def api_feed():
         return s
 
     posts.sort(key=score, reverse=True)
+    posts = posts[:30]
+
+    post_ids = [p.id for p in posts]
+    like_map, cmt_map, liked_ids, reposted_ids = _batch_post_counts(post_ids, me.id)
 
     return jsonify([
-    serialize_post(
-        p, me.id,
-        like_count=like_map.get(p.id, 0),
-        comment_count=cmt_map.get(p.id, 0),
-        liked=(p.id in liked_ids),
-        reposted=(p.id in reposted_ids),   # ← NEW
-    )
-    for p in posts
-])
+        serialize_post(
+            p, me.id,
+            like_count=like_map.get(p.id, 0),
+            comment_count=cmt_map.get(p.id, 0),
+            liked=(p.id in liked_ids),
+            reposted=(p.id in reposted_ids),
+        )
+        for p in posts
+    ])
 
 @app.route('/api/posts', methods=['POST'])
 @verified_required
@@ -957,6 +1180,14 @@ def api_create_post():
         tag = request.form.get('tag') or ('anon' if anon else 'gist')
         image = request.files.get('image')
         image_path = None
+
+        # ── BULLYING FILTER ──
+        if content and contains_bullying(content):
+            _log_blocked(current_user().id, 'post', content)
+            return jsonify({
+                'error': 'Your post contains language that violates our community guidelines.'
+            }), 400
+
         if image and image.filename and allowed_image(image.filename):
             image_path = save_upload(image, f'post{current_user().id}')
             if not image_path:
@@ -969,6 +1200,13 @@ def api_create_post():
         anon = bool(d.get('anonymous'))
         tag = d.get('tag') or ('anon' if anon else 'gist')
         image_path = None
+
+        # ── BULLYING FILTER ──
+        if content and contains_bullying(content):
+            _log_blocked(current_user().id, 'post', content)
+            return jsonify({
+                'error': 'Your post contains language that violates our community guidelines.'
+            }), 400
 
     if not content and not image_path:
         return jsonify({'error': 'Content or image required'}), 400
@@ -1035,8 +1273,16 @@ def api_comments(pid):
             if parent_id and not Comment.query.filter_by(id=parent_id, post_id=pid).first():
                 parent_id = None
 
+        # ── EMPTY CHECK ──
         if not content:
             return jsonify({'error': 'Empty'}), 400
+
+        # ── BULLYING FILTER ──
+        if contains_bullying(content):
+            _log_blocked(me.id, 'comment', content)
+            return jsonify({
+                'error': 'Comment flagged for inappropriate language.'
+            }), 400
 
         db.session.add(Comment(
             user_id=me.id, post_id=pid,
@@ -1045,6 +1291,7 @@ def api_comments(pid):
         ))
         db.session.commit()
 
+    # ── FETCH (runs for GET, and after successful POST) ──
     all_c = (Comment.query
              .filter_by(post_id=pid)
              .order_by(Comment.created_at.asc())
@@ -1074,7 +1321,7 @@ def api_comments(pid):
 
     return jsonify(top)
 
-    # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # POST VIEWS + REPOSTS
 # ─────────────────────────────────────────────
 @app.route('/api/posts/<int:pid>/view', methods=['POST'])
@@ -1108,7 +1355,7 @@ def api_post_repost(pid):
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-    # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # VIDEO FEED
 # ─────────────────────────────────────────────
 ALLOWED_VIDEO_EXT = {'mp4', 'mov', 'avi', 'webm', 'mkv'}
@@ -1236,6 +1483,13 @@ def api_video_upload():
     hashtags = (request.form.get('hashtags') or '').strip()
     tagged_raw = (request.form.get('tagged_user_ids') or '').strip()
     is_draft = (request.form.get('draft') or 'false').lower() == 'true'
+
+    # Also run the community-guidelines filter on captions
+    if caption and contains_bullying(caption):
+        _log_blocked(me.id, 'video_caption', caption)
+        return jsonify({
+            'error': 'Your caption contains language that violates our community guidelines.'
+        }), 400
 
     video_url, thumb_url, duration, public_id = save_video(file, f'video{me.id}')
     if not video_url:
@@ -1371,6 +1625,13 @@ def api_video_comments(vid):
         if not content:
             return jsonify({'error': 'Empty'}), 400
 
+        # FIX: same bullying filter as post comments
+        if contains_bullying(content):
+            _log_blocked(me.id, 'video_comment', content)
+            return jsonify({
+                'error': 'Comment flagged for inappropriate language.'
+            }), 400
+
         c = VideoComment(
             user_id=me.id, video_id=vid,
             parent_id=parent_id,
@@ -1489,6 +1750,8 @@ def api_listings():
             price = float(price)
         except ValueError:
             return jsonify({'error': 'Invalid price'}), 400
+        if price <= 0:
+            return jsonify({'error': 'Price must be greater than zero'}), 400
 
         image_path = None
         if image and image.filename and allowed_image(image.filename):
@@ -1591,7 +1854,9 @@ def buy_listing(listing_id):
 @app.route('/flutterwave/webhook', methods=['POST'])
 def flutterwave_webhook():
     incoming = request.headers.get('verif-hash', '')
-    if not FLW_WEBHOOK_HASH or incoming != FLW_WEBHOOK_HASH:
+    # FIX: constant-time comparison
+    if not FLW_WEBHOOK_HASH or not hmac.compare_digest(
+            incoming.encode('utf-8'), FLW_WEBHOOK_HASH.encode('utf-8')):
         return 'invalid signature', 401
 
     payload = request.get_json(silent=True) or {}
@@ -1603,23 +1868,78 @@ def flutterwave_webhook():
         return 'ok', 200
 
     meta = data.get('meta') or {}
-    if meta.get('type') == 'marketplace_sale':
-        listing_id = meta.get('listing_id')
-        buyer_id = meta.get('buyer_id')
-        ref = data.get('tx_ref')
-        listing = Listing.query.get(listing_id)
-        if listing and not listing.sold:
-            listing.sold = True
-            listing.sold_at = datetime.utcnow()
-            listing.buyer_id = buyer_id
-            listing.payment_reference = ref
-            db.session.commit()
-            print(f'✓ Sale: listing {listing_id} → buyer {buyer_id} ({ref})')
+    if meta.get('type') != 'marketplace_sale':
+        return 'ok', 200
+
+    listing_id = meta.get('listing_id')
+    buyer_id = meta.get('buyer_id')
+    ref = data.get('tx_ref')
+    tx_id = data.get('id')
+
+    listing = db.session.get(Listing, listing_id) if listing_id else None
+    if not listing or listing.sold:
+        return 'ok', 200
+
+    # FIX: never trust the webhook body alone — re-verify with Flutterwave
+    # and make sure the amount/currency/reference really match this listing.
+    if not tx_id or not FLW_SECRET_KEY:
+        print(f'⚠ [FLW WEBHOOK] missing tx id / secret key for {ref}')
+        return 'cannot verify', 400
+
+    try:
+        vr = requests.get(
+            f'https://api.flutterwave.com/v3/transactions/{tx_id}/verify',
+            headers={'Authorization': f'Bearer {FLW_SECRET_KEY}'},
+            timeout=15,
+        )
+        vr.raise_for_status()
+        vdata = (vr.json() or {}).get('data') or {}
+    except Exception as e:
+        print(f'⚠ [FLW WEBHOOK] verify failed for {ref}: {e}')
+        return 'verify failed', 502   # non-2xx → Flutterwave will retry
+
+    try:
+        paid = float(vdata.get('amount') or 0)
+        expected = float(listing.price or 0)
+    except (TypeError, ValueError):
+        return 'bad amount', 400
+
+    ok = (
+        vdata.get('status') == 'successful'
+        and vdata.get('currency') == 'NGN'
+        and vdata.get('tx_ref') == ref
+        and paid >= expected
+    )
+    if not ok:
+        print(f'🚫 [FLW WEBHOOK] verification mismatch for {ref}: '
+              f'paid={paid} expected={expected} status={vdata.get("status")}')
+        return 'ok', 200
+
+    listing.sold = True
+    listing.sold_at = datetime.utcnow()
+    listing.buyer_id = buyer_id
+    listing.payment_reference = ref
+    db.session.commit()
+    print(f'✓ Sale: listing {listing_id} → buyer {buyer_id} ({ref})')
 
     return 'ok', 200
 
 @app.route('/cloudinary/webhook', methods=['POST'])
 def cloudinary_webhook():
+    # FIX: verify Cloudinary's signature so strangers can't POST fake results
+    raw_body = request.get_data(as_text=True)
+    timestamp = request.headers.get('X-Cld-Timestamp', '')
+    signature = request.headers.get('X-Cld-Signature', '')
+    try:
+        valid = bool(timestamp and signature and
+                     cloudinary.utils.verify_notification_signature(
+                         raw_body, timestamp, signature))
+    except Exception as e:
+        print(f'⚠ [CLOUDINARY WEBHOOK] signature check error: {e}')
+        valid = False
+    if not valid:
+        return 'invalid signature', 401
+
     payload = request.get_json(silent=True) or {}
     if payload.get('notification_type') != 'moderation':
         return 'ok', 200
@@ -1667,20 +1987,6 @@ def cloudinary_webhook():
 def api_ads_pricing():
     return jsonify(AD_PRICING)
 
-    # ─────────────────────────────────────────────
-# PASSWORD RESET + SMTP  (module-level, no config lookups)
-# ─────────────────────────────────────────────
-PASSWORD_RESET_TOKEN_MINUTES      = int(os.environ.get('PASSWORD_RESET_TOKEN_MINUTES', '30'))
-PASSWORD_RESET_RATE_LIMIT_MINUTES = int(os.environ.get('PASSWORD_RESET_RATE_LIMIT_MINUTES', '5'))
-APP_BASE_URL                      = os.environ.get('APP_BASE_URL', '')
-
-SMTP_HOST     = os.environ.get('SMTP_HOST', '')
-SMTP_PORT     = int(os.environ.get('SMTP_PORT', '587'))
-SMTP_USER     = os.environ.get('SMTP_USER', '')
-SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
-SMTP_FROM     = os.environ.get('SMTP_FROM', 'no-reply@kamupus.com')
-SMTP_USE_TLS  = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
-
 @app.route('/api/market/promote/<int:listing_id>', methods=['POST'])
 @verified_required
 def api_promote_listing(listing_id):
@@ -1720,12 +2026,8 @@ def api_promote_listing(listing_id):
 # ─────────────────────────────────────────────
 @app.route(app.config['ADMIN_PATH'] + '/ads')
 def admin_ads():
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
 
     pending = AdPayment.query.filter_by(status='pending')\
         .order_by(AdPayment.created_at.desc()).all()
@@ -1736,12 +2038,9 @@ def admin_ads():
 
 @app.route(app.config['ADMIN_PATH'] + '/ads/<int:pid>/approve', methods=['POST'])
 def admin_ads_approve(pid):
+    g = _admin_guard()
+    if g: return g
     u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
 
     payment = AdPayment.query.get_or_404(pid)
     if payment.status != 'pending':
@@ -1771,12 +2070,9 @@ def admin_ads_approve(pid):
 
 @app.route(app.config['ADMIN_PATH'] + '/ads/<int:pid>/reject', methods=['POST'])
 def admin_ads_reject(pid):
+    g = _admin_guard()
+    if g: return g
     u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
 
     payment = AdPayment.query.get_or_404(pid)
     if payment.status == 'pending':
@@ -1893,7 +2189,7 @@ def api_assignment_delete(aid):
     db.session.commit()
     return jsonify({'ok': True})
 
-    # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # PAST QUESTIONS
 # ─────────────────────────────────────────────
 ALLOWED_PQ_FILES = {'pdf', 'png', 'jpg', 'jpeg', 'webp', 'doc', 'docx'}
@@ -2108,10 +2404,10 @@ def serialize_room_for(r, me, unread_count=0):
                            if other and other.last_seen else None)
 
     return {
-        'id': r.id, 
-        'name': display_name, 
+        'id': r.id,
+        'name': display_name,
         'avatar': avatar,
-        'is_group': r.is_group, 
+        'is_group': r.is_group,
         'other_user_id': other_user_id,
         'last_message': last_msg.content if last_msg else '',
         'last_time': time_ago(last_msg.created_at) if last_msg else '',
@@ -2143,6 +2439,22 @@ def api_chat_rooms_list():
     if not rooms:
         return jsonify([])
 
+    # ── HIDE DMs WHERE EITHER SIDE HAS BLOCKED THE OTHER (one query, not one per room) ──
+    blocked = _blocked_ids(me.id)
+    visible = []
+    for r in rooms:
+        if r.is_group:
+            visible.append(r)
+            continue
+        other = next((m for m in r.members if m.user_id != me.id), None)
+        if not other or other.user_id in blocked:
+            continue
+        visible.append(r)
+    rooms = visible
+
+    if not rooms:
+        return jsonify([])
+
     room_ids = [r.id for r in rooms]
     unread_rows = (db.session.query(
         ChatMessage.room_id, func.count(ChatMessage.id)
@@ -2163,6 +2475,7 @@ def api_chat_rooms_list():
         for r in rooms
     ])
 
+
 @app.route('/api/chat/rooms/<int:rid>/messages', methods=['GET', 'POST'])
 @verified_required
 def api_chat_messages(rid):
@@ -2170,19 +2483,29 @@ def api_chat_messages(rid):
     if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
         abort(403)
     room = ChatRoom.query.get_or_404(rid)
-    
+
+    # ── ENFORCE BLOCK FOR DMs ──
+    if _dm_blocked_for(room, me.id):
+        return jsonify({'error': 'This conversation is unavailable.'}), 403
+
     # ── SEND A MESSAGE ──
     if request.method == 'POST':
         d = request.get_json() or {}
         content = (d.get('content') or '').strip()
         if not content:
             return jsonify({'error': 'Empty message'}), 400
-            
+        content = content[:2000]
+
+        if contains_bullying(content):
+            _log_blocked(me.id, 'chat', content)
+            content = censor(content)
+
         msg = ChatMessage(room_id=rid, user_id=me.id, content=content)
         db.session.add(msg)
         db.session.commit()
-        
-        socketio.emit('new_message', {
+
+        # FIX: same event name + room name the socket handlers use ('message' → 'room_<id>')
+        socketio.emit('message', {
             'room_id': rid,
             'id': msg.id,
             'content': msg.content,
@@ -2191,16 +2514,16 @@ def api_chat_messages(rid):
             'avatar': user_avatar(me),
             'time': msg.created_at.strftime('%I:%M %p'),
             'created_at': msg.created_at.isoformat(),
-            'mine': False
-        }, room=f"chat_{rid}")
-        
+            'read_at': None,
+        }, room=f'room_{rid}')
+
         return jsonify({
             'id': msg.id, 'content': msg.content, 'user_id': msg.user_id,
             'author': me.full_name, 'avatar': user_avatar(me),
             'mine': True, 'time': msg.created_at.strftime('%I:%M %p'),
             'created_at': msg.created_at.isoformat(), 'read_at': None
         })
-        
+
     # ── FETCH MESSAGES ──
     return jsonify([{
         'id': m.id, 'content': m.content, 'user_id': m.user_id,
@@ -2211,28 +2534,37 @@ def api_chat_messages(rid):
         'read_at': m.read_at.isoformat() if m.read_at else None,
     } for m in room.messages])
 
+
 @app.route('/api/chat/rooms/<int:rid>/read', methods=['POST'])
 @verified_required
 def api_chat_read(rid):
     me = current_user()
+    # FIX: only members may mark a room as read
+    if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
+        abort(403)
     ChatMessage.query.filter(
-        ChatMessage.room_id == rid, 
-        ChatMessage.user_id != me.id, 
+        ChatMessage.room_id == rid,
+        ChatMessage.user_id != me.id,
         ChatMessage.read_at.is_(None)
     ).update({'read_at': datetime.utcnow()}, synchronize_session=False)
     db.session.commit()
     return jsonify({'ok': True})
 
+
 @app.route('/api/chat/rooms/<int:rid>/unread-count')
 @verified_required
 def api_chat_unread(rid):
     me = current_user()
+    # FIX: only members may query a room
+    if not ChatMember.query.filter_by(room_id=rid, user_id=me.id).first():
+        abort(403)
     count = (ChatMessage.query
              .filter(ChatMessage.room_id == rid,
                      ChatMessage.user_id != me.id,
                      ChatMessage.read_at.is_(None))
              .count())
     return jsonify({'count': count})
+
 
 @app.route('/api/chat/total-unread')
 @verified_required
@@ -2248,6 +2580,7 @@ def api_chat_total_unread():
              .count())
     return jsonify({'count': count})
 
+
 # ─────────────────────────────────────────────
 # GROUPS, DMS, AND USER LIST
 # ─────────────────────────────────────────────
@@ -2257,29 +2590,44 @@ def api_chat_total_unread():
 def api_chat_group_create():
     me = current_user()
     d = request.get_json() or {}
-    name = (d.get('name') or '').strip()
-    member_ids = d.get('member_ids') or []
+    name = (d.get('name') or '').strip()[:80]
 
-    if not name: 
+    # FIX: coerce IDs to ints so '5' and 5 are never treated as different users
+    try:
+        member_ids = {int(x) for x in (d.get('member_ids') or [])}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid member list'}), 400
+    member_ids.discard(me.id)
+
+    if not name:
         return jsonify({'error': 'Name required'}), 400
-    if len(member_ids) < 1: 
+    if len(member_ids) < 1:
         return jsonify({'error': 'Group needs at least 1 other member'}), 400
+    if len(member_ids) > 100:
+        return jsonify({'error': 'Groups are limited to 100 members'}), 400
+
+    # Only verified, non-blocked users can be added
+    blocked = _blocked_ids(me.id)
+    valid_ids = {
+        row[0] for row in db.session.query(User.id).filter(
+            User.id.in_(member_ids),
+            User.verification_status == 'verified',
+        ).all()
+    } - blocked
+    if not valid_ids:
+        return jsonify({'error': 'No valid members selected'}), 400
 
     room = ChatRoom(name=name, is_group=True)
     db.session.add(room)
     db.session.flush()
 
-    all_ids = set(member_ids) | {me.id}
-    for uid in all_ids:
-        if db.session.get(User, uid):
-            db.session.add(ChatMember(room_id=room.id, user_id=uid))
+    for uid in valid_ids | {me.id}:
+        db.session.add(ChatMember(room_id=room.id, user_id=uid))
     db.session.commit()
-    
-    # Force load members so serialize_room_for works
+
     db.session.refresh(room)
-    
-    # Return serialized room to match JS expectations
     return jsonify(serialize_room_for(room, me))
+
 
 @app.route('/api/chat/dm/<int:user_id>', methods=['POST'])
 @verified_required
@@ -2292,6 +2640,10 @@ def api_chat_dm_open(user_id):
     if target.verification_status != 'verified':
         return jsonify({'error': 'User not verified'}), 403
 
+    # ── CANNOT OPEN A DM IF EITHER SIDE HAS BLOCKED THE OTHER ──
+    if _is_blocked_between(me.id, user_id):
+        return jsonify({'error': 'Cannot start a conversation with this user.'}), 403
+
     key = dm_key_for(me.id, user_id)
     existing = ChatRoom.query.filter_by(dm_key=key).first()
     if existing:
@@ -2303,27 +2655,121 @@ def api_chat_dm_open(user_id):
     db.session.add(ChatMember(room_id=room.id, user_id=me.id))
     db.session.add(ChatMember(room_id=room.id, user_id=user_id))
     db.session.commit()
-    
-    # Force load members
-    db.session.refresh(room)
 
+    db.session.refresh(room)
     return jsonify(serialize_room_for(room, me))
+
 
 @app.route('/api/chat/users', methods=['GET'])
 @verified_required
 def api_chat_users():
     me = current_user()
+    blocked = _blocked_ids(me.id)
     users = User.query.filter(
-        User.id != me.id, 
+        User.id != me.id,
         User.verification_status == 'verified',
         User.role != 'admin'
-    ).limit(50).all()
-    
+    ).limit(100).all()
+
     return jsonify([{
         'id': u.id,
         'full_name': u.full_name,
         'avatar': user_avatar(u)
-    } for u in users])
+    } for u in users if u.id not in blocked][:50])
+
+
+@app.route('/api/users/<int:uid>/block', methods=['POST'])
+@verified_required
+def api_block_user(uid):
+    me = current_user().id
+    if uid == me:
+        return jsonify({'error': 'You cannot block yourself'}), 400
+
+    target = User.query.get_or_404(uid)
+
+    existing = UserBlock.query.filter_by(blocker_id=me, blocked_id=uid).first()
+    if existing:
+        return jsonify({'ok': True, 'blocked': True, 'block_id': existing.id})
+
+    b = UserBlock(blocker_id=me, blocked_id=uid)
+    db.session.add(b)
+    db.session.commit()
+    return jsonify({'ok': True, 'blocked': True, 'block_id': b.id})
+
+
+@app.route('/api/users/<int:uid>/block', methods=['DELETE'])
+@verified_required
+def api_unblock_user(uid):
+    me = current_user().id
+    existing = UserBlock.query.filter_by(blocker_id=me, blocked_id=uid).first()
+    if existing:
+        db.session.delete(existing)
+        db.session.commit()
+    return jsonify({'ok': True, 'blocked': False})
+
+
+@app.route('/api/users/<int:uid>/block-status')
+@verified_required
+def api_block_status(uid):
+    me = current_user().id
+    blocked = bool(UserBlock.query.filter_by(blocker_id=me, blocked_id=uid).first())
+    return jsonify({'blocked': blocked})
+
+
+@app.route('/api/me/blocked')
+@verified_required
+def api_me_blocked():
+    me = current_user().id
+    rows = UserBlock.query.filter_by(blocker_id=me).order_by(UserBlock.created_at.desc()).all()
+    out = []
+    for b in rows:
+        u = db.session.get(User, b.blocked_id)
+        if not u:
+            continue
+        out.append({
+            'id': u.id, 'name': u.full_name, 'avatar': user_avatar(u),
+            'blocked_at': b.created_at.isoformat(),
+        })
+    return jsonify(out)
+
+@app.route('/blocked-users')
+@verified_required
+def blocked_users():
+    return render_template('blocked_users.html', user=current_user())
+
+
+@app.route('/api/users/<int:uid>/report', methods=['POST'])
+@verified_required
+def api_report_user(uid):
+    me = current_user().id
+    if uid == me:
+        return jsonify({'error': 'You cannot report yourself'}), 400
+
+    target = User.query.get_or_404(uid)
+    d = request.get_json() or {}
+    reason  = (d.get('reason')  or '').strip()
+    context = (d.get('context') or '').strip()
+    room_id = d.get('room_id')
+
+    if not reason:
+        return jsonify({'error': 'Reason is required'}), 400
+
+    recent = UserReport.query.filter(
+        UserReport.reporter_id == me,
+        UserReport.reported_id == uid,
+        UserReport.created_at > datetime.utcnow() - timedelta(hours=1),
+    ).first()
+    if recent:
+        return jsonify({'error': 'You already reported this user recently. Please wait.'}), 429
+
+    r = UserReport(
+        reporter_id=me, reported_id=uid,
+        reason=reason[:200], context=context[:500],
+        room_id=room_id if isinstance(room_id, int) else None,
+    )
+    db.session.add(r)
+    db.session.commit()
+    return jsonify({'ok': True, 'report_id': r.id})
 
 # ─────────────────────────────────────────────
 # USER SEARCH
@@ -2335,12 +2781,16 @@ def api_users_search():
     q = (request.args.get('q') or '').strip().lower()
     if not q: return jsonify([])
 
+    blocked = _blocked_ids(me)
+
     candidates = User.query.filter(
         User.id != me, User.role != 'admin',
         User.verification_status == 'verified',
     ).limit(500).all()
 
     def matches(u):
+        if u.id in blocked:
+            return False
         name = (u.full_name or '').lower()
         email = (u.email or '').lower()
         if q in name: return True
@@ -2702,7 +3152,7 @@ def api_connect_suggestions():
     existing = Connection.query.filter(
         db.or_(Connection.requester_id == me.id, Connection.recipient_id == me.id)
     ).all()
-    excluded_ids = {me.id}
+    excluded_ids = {me.id} | _blocked_ids(me.id)
     for c in existing:
         excluded_ids.add(c.requester_id)
         excluded_ids.add(c.recipient_id)
@@ -2741,6 +3191,8 @@ def api_connect_send(user_id):
     me = current_user().id
     if user_id == me:
         return jsonify({'error': 'Cannot connect to yourself'}), 400
+    if _is_blocked_between(me, user_id):
+        return jsonify({'error': 'Cannot connect with this user.'}), 403
 
     reverse = Connection.query.filter_by(
         requester_id=user_id, recipient_id=me, status='pending').first()
@@ -2874,7 +3326,6 @@ def user_profile(uid):
                            following_count=following_count, is_following=is_following,
                            avatar=user_avatar(target))
 
-# ── SINGLE definition of api_user_posts (the duplicate has been removed) ──
 @app.route('/api/user/<int:uid>/posts')
 @verified_required
 def api_user_posts(uid):
@@ -2893,19 +3344,27 @@ def api_user_posts(uid):
         for p in posts
     ])
 
+# FIX: these two used the Connection table while the profile counts use Follow,
+# so the numbers never matched. Both now read from Follow.
 @app.route('/api/me/following')
 @verified_required
 def api_me_following():
     me = current_user().id
-    rows = Connection.query.filter_by(requester_id=me, status='accepted').all()
-    return jsonify([serialize_connection_user(c.recipient, 'following', c.id) for c in rows])
+    users = (User.query
+             .join(Follow, Follow.following_id == User.id)
+             .filter(Follow.follower_id == me)
+             .all())
+    return jsonify([serialize_connection_user(u, 'following') for u in users])
 
 @app.route('/api/me/followers')
 @verified_required
 def api_me_followers():
     me = current_user().id
-    rows = Connection.query.filter_by(recipient_id=me, status='accepted').all()
-    return jsonify([serialize_connection_user(c.requester, 'follower', c.id) for c in rows])
+    users = (User.query
+             .join(Follow, Follow.follower_id == User.id)
+             .filter(Follow.following_id == me)
+             .all())
+    return jsonify([serialize_connection_user(u, 'follower') for u in users])
 
 # ─────────────────────────────────────────────
 # ADMIN
@@ -2918,21 +3377,35 @@ def admin_login():
         return redirect(url_for('admin'))
 
     if request.method == 'POST':
+        ip = client_ip()
+
+        # FIX: brute-force protection
+        if _admin_rate_limited(ip):
+            flash('Too many failed attempts. Try again in 15 minutes.', 'error')
+            return render_template('admin_login.html'), 429
+
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
         admin_key = request.form.get('admin_key', '').strip()
 
         user = User.query.filter_by(email=email, role='admin').first()
         if not user or not check_password_hash(user.password_hash, password):
+            _admin_record_fail(ip)
             flash('Invalid admin email or password', 'error')
             return render_template('admin_login.html')
 
-        if admin_key != app.config['ADMIN_KEY']:
+        # FIX: constant-time comparison for the admin key
+        expected_key = str(app.config.get('ADMIN_KEY') or '')
+        if not expected_key or not hmac.compare_digest(
+                admin_key.encode('utf-8'), expected_key.encode('utf-8')):
+            _admin_record_fail(ip)
             flash('Invalid admin key', 'error')
             return render_template('admin_login.html')
 
+        _admin_clear_fails(ip)
         session['user_id'] = user.id
         session['admin_unlocked'] = True
+        session.permanent = True
         touch_admin_session()
         log_admin_action('admin_login')
         flash('Admin unlocked', 'success')
@@ -2971,16 +3444,41 @@ def admin_view():
                       .filter_by(status='pending')
                       .count())
 
+    # FIX: these two were passed to the template but never defined
+    recent_reports = (UserReport.query
+                      .order_by(UserReport.created_at.desc())
+                      .limit(30).all())
+    pending_reports_count = (UserReport.query
+                             .filter_by(status='pending')
+                             .count())
+
     return render_template(
         'admin.html',
-        pending=pending,
-        recent=recent,
+        pending=pending, recent=recent,
         pending_videos=pending_videos,
         pending_pq=pending_pq,
         pending_ads=pending_ads,
+        recent_reports=recent_reports,
+        pending_reports_count=pending_reports_count,
     )
 
 app.add_url_rule(app.config['ADMIN_PATH'], 'admin', admin_view)
+
+# FIX: admin.html calls url_for('admin_report_action', ...) — this route didn't exist
+@app.route(app.config['ADMIN_PATH'] + '/reports/<int:rid>/<action>', methods=['POST'])
+def admin_report_action(rid, action):
+    g = _admin_guard()
+    if g: return g
+
+    if action not in ('reviewed', 'dismissed'):
+        abort(400)
+
+    r = UserReport.query.get_or_404(rid)
+    r.status = action
+    db.session.commit()
+    log_admin_action(f'report_{action}', target_user_id=r.reported_id, detail=f'report {rid}')
+    flash(f'Report marked {action}', 'success')
+    return redirect(url_for('admin'))
 
 @app.route(app.config['ADMIN_PATH'] + '/lock')
 def admin_lock():
@@ -2991,10 +3489,9 @@ def admin_lock():
 
 @app.route(app.config['ADMIN_PATH'] + '/approve/<int:vid>', methods=['POST'])
 def admin_approve(vid):
+    g = _admin_guard()
+    if g: return g
     u = current_user()
-    if not u or u.role != 'admin': abort(404)
-    if not is_admin_unlocked(): return redirect(url_for('admin_login'))
-    touch_admin_session()
 
     v = StudentVerification.query.get_or_404(vid)
     v.status = 'approved'
@@ -3009,10 +3506,9 @@ def admin_approve(vid):
 
 @app.route(app.config['ADMIN_PATH'] + '/reject/<int:vid>', methods=['POST'])
 def admin_reject(vid):
+    g = _admin_guard()
+    if g: return g
     u = current_user()
-    if not u or u.role != 'admin': abort(404)
-    if not is_admin_unlocked(): return redirect(url_for('admin_login'))
-    touch_admin_session()
 
     reason = request.form.get('reason', '').strip() or 'Document could not be verified'
     v = StudentVerification.query.get_or_404(vid)
@@ -3029,12 +3525,8 @@ def admin_reject(vid):
 
 @app.route(app.config['ADMIN_PATH'] + '/past-questions')
 def admin_past_questions():
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
 
     pending = (PastQuestion.query.filter_by(approved=False)
                .order_by(PastQuestion.created_at.asc()).all())
@@ -3046,12 +3538,8 @@ def admin_past_questions():
 
 @app.route(app.config['ADMIN_PATH'] + '/past-questions/<int:pqid>/approve', methods=['POST'])
 def admin_pq_approve(pqid):
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
 
     pq = PastQuestion.query.get_or_404(pqid)
     pq.approved = True
@@ -3064,39 +3552,30 @@ def admin_pq_approve(pqid):
 
 @app.route(app.config['ADMIN_PATH'] + '/past-questions/<int:pqid>/reject', methods=['POST'])
 def admin_pq_reject(pqid):
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
 
     pq = PastQuestion.query.get_or_404(pqid)
     reason = (request.form.get('reason') or '').strip() or 'Rejected'
+    code, uploader_id = pq.course_code, pq.uploader_id
     delete_upload(pq.file_path)
     db.session.delete(pq)
     db.session.commit()
-    log_admin_action('pq_reject', target_user_id=pq.uploader_id, detail=reason)
-    flash(f'Rejected {pq.course_code}', 'success')
+    log_admin_action('pq_reject', target_user_id=uploader_id, detail=reason)
+    flash(f'Rejected {code}', 'success')
     return redirect(url_for('admin_past_questions'))
 
 @app.route(app.config['ADMIN_PATH'] + '/log')
 def admin_log_view():
-    u = current_user()
-    if not u or u.role != 'admin': abort(404)
-    if not is_admin_unlocked(): return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
     logs = AdminAction.query.order_by(AdminAction.created_at.desc()).limit(200).all()
     return render_template('admin_log.html', logs=logs)
 
 @app.route(app.config['ADMIN_PATH'] + '/videos')
 def admin_videos():
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
     flagged = (VideoPost.query
                .filter(VideoPost.moderation_status == 'flagged')
                .order_by(VideoPost.created_at.asc()).all())
@@ -3109,12 +3588,8 @@ def admin_videos():
 
 @app.route(app.config['ADMIN_PATH'] + '/videos/<int:vid>/approve', methods=['POST'])
 def admin_video_approve(vid):
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
     v = VideoPost.query.get_or_404(vid)
     v.is_hidden = False
     v.moderation_status = 'approved'
@@ -3126,13 +3601,10 @@ def admin_video_approve(vid):
 
 @app.route(app.config['ADMIN_PATH'] + '/videos/<int:vid>/delete', methods=['POST'])
 def admin_video_delete(vid):
-    u = current_user()
-    if not u or u.role != 'admin':
-        abort(404)
-    if not is_admin_unlocked():
-        return redirect(url_for('admin_login'))
-    touch_admin_session()
+    g = _admin_guard()
+    if g: return g
     v = VideoPost.query.get_or_404(vid)
+    owner_id = v.user_id
     if v.cloudinary_id:
         try:
             cloudinary.uploader.destroy(v.cloudinary_id, resource_type='video')
@@ -3140,7 +3612,7 @@ def admin_video_delete(vid):
             pass
     db.session.delete(v)
     db.session.commit()
-    log_admin_action('video_delete', target_user_id=v.user_id, detail=str(vid))
+    log_admin_action('video_delete', target_user_id=owner_id, detail=str(vid))
     flash('Video deleted', 'success')
     return redirect(url_for('admin_videos'))
 
@@ -3196,20 +3668,26 @@ def ws_disconnect():
 
 @socketio.on('join')
 def ws_join(data):
-    rid = data.get('room_id')
+    rid = (data or {}).get('room_id')
     if not rid: return
     u = current_user()
     if not u: return
     if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first(): return
+
+    # FIX: don't let someone join a DM room once either side has blocked the other
+    room = db.session.get(ChatRoom, rid)
+    if not room or _dm_blocked_for(room, u.id):
+        return
     join_room(f'room_{rid}')
 
 @socketio.on('leave')
 def ws_leave(data):
-    rid = data.get('room_id')
+    rid = (data or {}).get('room_id')
     if rid: leave_room(f'room_{rid}')
 
 @socketio.on('message')
 def ws_message(data):
+    data = data or {}
     rid = data.get('room_id')
     content = (data.get('content') or '').strip()
     u = current_user()
@@ -3218,11 +3696,28 @@ def ws_message(data):
     if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first():
         return
 
-    msg = ChatMessage(room_id=rid, user_id=u.id, content=content[:2000])
+    room = db.session.get(ChatRoom, rid)
+    if not room:
+        return
+
+    # FIX: same block check as the REST route
+    if _dm_blocked_for(room, u.id):
+        emit('error_message', {'room_id': rid, 'error': 'This conversation is unavailable.'})
+        return
+
+    content = content[:2000]
+
+    # FIX: same bullying filter as the REST route
+    if contains_bullying(content):
+        _log_blocked(u.id, 'chat-ws', content)
+        content = censor(content)
+
+    msg = ChatMessage(room_id=rid, user_id=u.id, content=content)
     db.session.add(msg)
     db.session.commit()
 
     payload = {
+        'room_id': rid,
         'id': msg.id,
         'content': msg.content,
         'user_id': u.id,
@@ -3234,37 +3729,35 @@ def ws_message(data):
     }
     emit('message', payload, to=f'room_{rid}')
 
-    room = ChatRoom.query.get(rid)
-    if room:
-        unread_by_sender = dict(
-            db.session.query(ChatMessage.user_id, func.count(ChatMessage.id))
-            .filter(ChatMessage.room_id == rid, ChatMessage.read_at.is_(None))
-            .group_by(ChatMessage.user_id)
-            .all()
-        )
-        total_unread = sum(unread_by_sender.values())
+    unread_by_sender = dict(
+        db.session.query(ChatMessage.user_id, func.count(ChatMessage.id))
+        .filter(ChatMessage.room_id == rid, ChatMessage.read_at.is_(None))
+        .group_by(ChatMessage.user_id)
+        .all()
+    )
+    total_unread = sum(unread_by_sender.values())
 
-        for m in room.members:
-            if m.user_id == u.id:
-                continue
-            unread = total_unread - unread_by_sender.get(m.user_id, 0)
-            unread_label = (f'{unread} new message' + ('s' if unread != 1 else '')) if unread > 0 else ''
-            emit('room_update',
-                 {
-                     'room_id': rid,
-                     'last_message': msg.content[:80],
-                     'last_time': time_ago(msg.created_at),
-                     'unread': unread,
-                     'unread_label': unread_label,
-                     'from_user_id': u.id,
-                     'from_name': u.full_name,
-                     'from_avatar': user_avatar(u),
-                 },
-                 to=f'user_{m.user_id}')
+    for m in room.members:
+        if m.user_id == u.id:
+            continue
+        unread = total_unread - unread_by_sender.get(m.user_id, 0)
+        unread_label = (f'{unread} new message' + ('s' if unread != 1 else '')) if unread > 0 else ''
+        emit('room_update',
+             {
+                 'room_id': rid,
+                 'last_message': msg.content[:80],
+                 'last_time': time_ago(msg.created_at),
+                 'unread': unread,
+                 'unread_label': unread_label,
+                 'from_user_id': u.id,
+                 'from_name': u.full_name,
+                 'from_avatar': user_avatar(u),
+             },
+             to=f'user_{m.user_id}')
 
 @socketio.on('typing')
 def ws_typing(data):
-    rid = data.get('room_id')
+    rid = (data or {}).get('room_id')
     u = current_user()
     if not rid or not u:
         return
@@ -3276,9 +3769,11 @@ def ws_typing(data):
 
 @socketio.on('stop_typing')
 def ws_stop_typing(data):
-    rid = data.get('room_id')
+    rid = (data or {}).get('room_id')
     u = current_user()
     if not rid or not u:
+        return
+    if not ChatMember.query.filter_by(room_id=rid, user_id=u.id).first():
         return
     emit('stop_typing',
          {'room_id': rid, 'user_id': u.id},
@@ -3286,7 +3781,7 @@ def ws_stop_typing(data):
 
 @socketio.on('read')
 def ws_read(data):
-    rid = data.get('room_id')
+    rid = (data or {}).get('room_id')
     u = current_user()
     if not rid or not u:
         return
@@ -3309,7 +3804,7 @@ def ws_read(data):
              to=f'user_{u.id}')
 
 # ─────────────────────────────────────────────
-# DEBUG
+# DEBUG (admin only)
 # ─────────────────────────────────────────────
 @app.route('/api/debug/users')
 @verified_required
@@ -3328,10 +3823,16 @@ def api_debug_users():
 @app.route('/api/debug/supabase')
 @session_login_required
 def debug_supabase():
+    # FIX: was open to every logged-in user
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+
     result = {
         'env_url_set': bool(SUPABASE_URL),
         'env_key_set': bool(SUPABASE_KEY),
         'bucket_name': SUPABASE_BUCKET,
+        'private_bucket_set': bool(SUPABASE_PRIVATE_BUCKET),
     }
     if not SUPABASE_URL or not SUPABASE_KEY:
         result['error'] = 'Supabase not configured (env vars missing)'
@@ -3357,7 +3858,11 @@ def debug_supabase():
 @app.route('/api/debug/cloudinary')
 @session_login_required
 def debug_cloudinary():
-    import cloudinary.api
+    # FIX: was open to every logged-in user
+    u = current_user()
+    if not u or u.role != 'admin':
+        abort(404)
+
     result = {
         'cloud_name_set': bool(os.environ.get('CLOUDINARY_CLOUD_NAME')),
         'api_key_set': bool(os.environ.get('CLOUDINARY_API_KEY')),
@@ -3379,9 +3884,17 @@ def debug_cloudinary():
 # INIT — non-blocking, background thread
 # ─────────────────────────────────────────────
 def _ensure_admin():
-    """Create or update the admin user. Called once after DB is ready."""
-    admin_email = os.environ.get('ADMIN_EMAIL', 'oladipobright12@gmail.com')
-    admin_pass = os.environ.get('ADMIN_PASSWORD', 'bright_kelvin*$')
+    """Create or update the admin user. Called once after DB is ready.
+
+    FIX: no more hardcoded fallback email/password. Set ADMIN_EMAIL and
+    ADMIN_PASSWORD as environment variables.
+    """
+    admin_email = (os.environ.get('ADMIN_EMAIL') or '').strip().lower()
+    admin_pass = os.environ.get('ADMIN_PASSWORD') or ''
+
+    if not admin_email or not admin_pass:
+        print('⚠ ADMIN_EMAIL / ADMIN_PASSWORD not set — skipping admin bootstrap')
+        return
 
     existing = User.query.filter_by(email=admin_email).first()
     if existing:
@@ -3420,33 +3933,32 @@ def _init_db():
                 insp = inspect(db.engine)
                 tables = set(insp.get_table_names())
                 wanted = {
-    'users': {
-        'whatsapp_number':         'VARCHAR(20)',
-        'bio':                     'VARCHAR(200)',
-        'subaccount_code':         'VARCHAR(50)',
-        'paystack_recipient_code': 'VARCHAR(50)',
-        'last_seen':               'TIMESTAMP',
-    },
-    'chat_messages': {
-        'read_at':                 'TIMESTAMP',
-    },
-    # ── NEW ──
-    'posts': {
-        'views':                   'INTEGER DEFAULT 0',
-        'reposts_count':           'INTEGER DEFAULT 0',
-    },
-    'video_posts': {
-        'reposts_count':           'INTEGER DEFAULT 0',
-        'cloudinary_id':           'VARCHAR(200)',
-        'moderation_score':        'FLOAT',
-    },
-    'comments': {
-    'parent_id': 'INTEGER',
-},
-'video_comments': {
-    'parent_id': 'INTEGER',
-},
-}
+                    'users': {
+                        'whatsapp_number':         'VARCHAR(20)',
+                        'bio':                     'VARCHAR(200)',
+                        'subaccount_code':         'VARCHAR(50)',
+                        'paystack_recipient_code': 'VARCHAR(50)',
+                        'last_seen':               'TIMESTAMP',
+                    },
+                    'chat_messages': {
+                        'read_at':                 'TIMESTAMP',
+                    },
+                    'posts': {
+                        'views':                   'INTEGER DEFAULT 0',
+                        'reposts_count':           'INTEGER DEFAULT 0',
+                    },
+                    'video_posts': {
+                        'reposts_count':           'INTEGER DEFAULT 0',
+                        'cloudinary_id':           'VARCHAR(200)',
+                        'moderation_score':        'FLOAT',
+                    },
+                    'comments': {
+                        'parent_id':               'INTEGER',
+                    },
+                    'video_comments': {
+                        'parent_id':               'INTEGER',
+                    },
+                }
                 with db.engine.begin() as conn:
                     for table, cols in wanted.items():
                         if table not in tables:
@@ -3485,26 +3997,23 @@ def handle_413(e):
 # for local development only — it is intentionally NOT reached in prod.
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_ENV') == 'development'
+    debug = IS_DEV
 
+    # FIX: no longer prints the admin key / admin email
     print('=' * 60)
     print(f'  LOCAL URL  : http://localhost:{port}')
-    print(f'  LOCAL IP   : http://127.0.0.1:{port}')
-    print(f'  ADMIN URL  : {app.config["ADMIN_PATH"]}')
-    print(f'  ADMIN KEY  : {app.config["ADMIN_KEY"]}')
     print(f'  ADMIN LOGIN: http://localhost:{port}/admin-login')
-    print(f'  ADMIN EMAIL: {os.environ.get("ADMIN_EMAIL", "oladipobright12@gmail.com")}')
     print(f'  FLW READY  : {"YES" if FLW_SECRET_KEY else "NO"}')
     print(f'  SUPABASE   : {"YES" if (SUPABASE_URL and SUPABASE_KEY) else "NO"}')
+    print(f'  PRIVATE BKT: {"YES" if SUPABASE_PRIVATE_BUCKET else "NO"}')
     print(f'  CLOUDINARY : {"YES" if os.environ.get("CLOUDINARY_CLOUD_NAME") else "NO"}')
-    print(f'  OPAY       : {AD_PAYMENT_ACCOUNT} ({AD_PAYMENT_NAME})')
     print('=' * 60)
 
     import platform
     if platform.system() == 'Windows':
         print('⚙  Windows detected — using threading backend for local dev', flush=True)
         from flask_socketio import SocketIO as _SIO
-        _local_sio = _SIO(app, cors_allowed_origins='*',
+        _local_sio = _SIO(app, cors_allowed_origins=ALLOWED_ORIGINS,
                           async_mode='threading',
                           ping_interval=25, ping_timeout=60)
         for event in list(socketio.server.handlers.keys()):

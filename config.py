@@ -41,11 +41,30 @@ class Config:
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # Connection pool - fixes Neon/Supabase idle disconnects
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_pre_ping': True,
-        'pool_recycle': 300,
-    }
+    # ── Connection pool ──
+    # pool_pre_ping + pool_recycle handle idle disconnects.
+    # connect_args sends TCP keepalives so the server *sees* the connection
+    # as alive and doesn't close it mid-idle. This is what fixes
+    # "SSL SYSCALL error: EOF detected" on Neon / Supabase / RDS.
+    # Only applied for PostgreSQL — SQLite doesn't accept these args.
+    if (SQLALCHEMY_DATABASE_URI or '').startswith('postgresql'):
+        SQLALCHEMY_ENGINE_OPTIONS = {
+            'pool_pre_ping': True,
+            'pool_recycle': 300,
+            'connect_args': {
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 5,
+                'keepalives_count': 5,
+                'connect_timeout': 10,
+                'sslmode': 'require',
+            },
+        }
+    else:
+        SQLALCHEMY_ENGINE_OPTIONS = {
+            'pool_pre_ping': True,
+            'pool_recycle': 300,
+        }
 
     # ── Uploads ──
     UPLOAD_FOLDER = env_or('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads'))

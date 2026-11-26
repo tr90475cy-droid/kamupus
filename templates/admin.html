@@ -4,6 +4,39 @@
 
 {% block content %}
 
+<style>
+  /* User reports table (self-contained so it doesn't depend on site CSS) */
+  .report-table-wrap { overflow-x: auto; margin-top: 12px; }
+  .admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .admin-table th,
+  .admin-table td {
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid rgba(128, 128, 128, .25);
+  }
+  .admin-table th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    opacity: .7;
+  }
+  .admin-table small { opacity: .7; }
+  .report-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .report-actions form { margin: 0; }
+  .report-actions button {
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(128, 128, 128, .4);
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .report-actions button:hover { background: rgba(128, 128, 128, .15); }
+  .report-status { text-transform: capitalize; }
+</style>
+
 <div class="admin-wrap">
 
   <!-- ═══════════ HEADER ═══════════ -->
@@ -13,13 +46,14 @@
       <p class="sub">Review student verifications and manage the campus</p>
     </div>
     <div class="admin-head-actions">
-      <a href="{{ url_for('home') }}"              class="btn btn-ghost btn-sm">View Feed</a>
-      <a href="{{ url_for('admin_videos') }}"      class="btn btn-ghost btn-sm">Videos</a>
-      <a href="{{ url_for('admin_past_questions') }}" class="btn btn-ghost btn-sm">Past Q</a>
-      <a href="{{ url_for('admin_ads') }}"         class="btn btn-ghost btn-sm">Ads</a>
-      <a href="{{ url_for('admin_log_view') }}"    class="btn btn-ghost btn-sm">Audit Log</a>
-      <a href="{{ url_for('admin_lock') }}"        class="btn btn-ghost btn-sm">Lock</a>
-      <a href="{{ url_for('logout') }}"            class="btn btn-ghost btn-sm">Sign out</a>
+      <a href="{{ url_for('home') }}"                 class="btn btn-ghost btn-sm">View Feed</a>
+      <a href="{{ url_for('admin_videos') }}"         class="btn btn-ghost btn-sm">Videos{% if pending_videos %} ({{ pending_videos }}){% endif %}</a>
+      <a href="{{ url_for('admin_past_questions') }}" class="btn btn-ghost btn-sm">Past Q{% if pending_pq %} ({{ pending_pq }}){% endif %}</a>
+      <a href="{{ url_for('admin_ads') }}"            class="btn btn-ghost btn-sm">Ads{% if pending_ads %} ({{ pending_ads }}){% endif %}</a>
+      <a href="#user-reports"                         class="btn btn-ghost btn-sm">Reports{% if pending_reports_count %} ({{ pending_reports_count }}){% endif %}</a>
+      <a href="{{ url_for('admin_log_view') }}"       class="btn btn-ghost btn-sm">Audit Log</a>
+      <a href="{{ url_for('admin_lock') }}"           class="btn btn-ghost btn-sm">Lock</a>
+      <a href="{{ url_for('logout') }}"               class="btn btn-ghost btn-sm">Sign out</a>
     </div>
   </div>
 
@@ -38,8 +72,8 @@
       <div class="stat-label">Recently Rejected</div>
     </div>
     <div class="stat">
-      <div class="stat-num">{{ (pending|length) + (recent|length) }}</div>
-      <div class="stat-label">Pending + Recent</div>
+      <div class="stat-num">{{ pending_reports_count or 0 }}</div>
+      <div class="stat-label">Pending Reports</div>
     </div>
   </div>
 
@@ -132,18 +166,20 @@
         </ul>
       {% endif %}
 
-      <!-- ── DOCUMENT PREVIEW ── -->
+      <!-- ── DOCUMENT PREVIEW ──
+           file_url() handles public Supabase URLs, private-bucket files
+           (served through a short-lived signed URL) and old local uploads. -->
       <div class="verify-doc">
         {% if path %}
           {% if is_pdf %}
-            <a href="{{ url_for('uploaded_file', filename=path) }}"
+            <a href="{{ file_url(path) }}"
                target="_blank" rel="noopener">
               📄 Open PDF document in new tab
             </a>
           {% else %}
-            <a href="{{ url_for('uploaded_file', filename=path) }}"
+            <a href="{{ file_url(path) }}"
                target="_blank" rel="noopener">
-              <img src="{{ url_for('uploaded_file', filename=path) }}"
+              <img src="{{ file_url(path) }}"
                    alt="Admission letter for {{ v.user.full_name }}"
                    loading="lazy"
                    decoding="async">
@@ -197,6 +233,67 @@
     </div>
   {% endfor %}
 
+  <!-- ═══════════ USER REPORTS ═══════════ -->
+  <h2 class="admin-section-title" id="user-reports" style="margin-top:36px;">
+    User Reports
+    {% if pending_reports_count %}<span class="badge">{{ pending_reports_count }}</span>{% endif %}
+  </h2>
+
+  {% if recent_reports %}
+    <div class="report-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Reporter</th>
+            <th>Reported</th>
+            <th>Reason</th>
+            <th>When</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in recent_reports %}
+          <tr>
+            <td>#{{ r.reporter_id }}</td>
+            <td>#{{ r.reported_id }}</td>
+            <td>
+              {{ r.reason }}
+              {% if r.context %}<br><small>{{ r.context }}</small>{% endif %}
+            </td>
+            <td>{{ r.created_at.strftime('%b %d, %H:%M') if r.created_at else '—' }}</td>
+            <td><span class="badge report-status">{{ r.status }}</span></td>
+            <td>
+              {% if r.status == 'pending' %}
+                <div class="report-actions">
+                  <form method="post"
+                        action="{{ url_for('admin_report_action', rid=r.id, action='reviewed') }}">
+                    {% if csrf_token is defined %}
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    {% endif %}
+                    <button type="submit">Mark reviewed</button>
+                  </form>
+                  <form method="post"
+                        action="{{ url_for('admin_report_action', rid=r.id, action='dismissed') }}">
+                    {% if csrf_token is defined %}
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    {% endif %}
+                    <button type="submit">Dismiss</button>
+                  </form>
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty" style="padding:24px;">
+      No user reports yet.
+    </div>
+  {% endif %}
+
   <!-- ═══════════ RECENT DECISIONS ═══════════ -->
   <h2 class="admin-section-title" style="margin-top:36px;">
     Recent Decisions
@@ -243,7 +340,6 @@
 
 </div>
 
-{% if request.endpoint == 'admin' %}
 <script>
   document.querySelectorAll('form[data-confirm]').forEach(function (form) {
     form.addEventListener('submit', function (e) {
@@ -251,6 +347,5 @@
     });
   });
 </script>
-{% endif %}
 
 {% endblock %}

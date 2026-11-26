@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Blocked Users — KAMUPUS{% endblock %}
+
+{% block content %}
+<div class="blocked-page">
+  <div class="blocked-header">
+    <a href="{{ url_for('me') }}" class="blocked-back">← Back</a>
+    <h1>Blocked Users</h1>
+    <p class="blocked-intro">
+      People you've blocked can't message you or see your posts.
+      You can unblock them at any time.
+    </p>
+  </div>
+
+  <div id="blockedList" class="blocked-list">
+    <div class="blocked-empty">Loading…</div>
+  </div>
+</div>
+
+<style>
+  .blocked-page { max-width: 640px; margin: 2rem auto; padding: 0 1.25rem; }
+  .blocked-header h1 { font-size: 1.6rem; margin: .5rem 0 .25rem; color: #fff; }
+  .blocked-intro { color: #999; font-size: .9rem; margin-bottom: 1.5rem; }
+  .blocked-back { color: #ff7900; text-decoration: none; font-size: .85rem; }
+  .blocked-list { display: flex; flex-direction: column; gap: 10px; }
+  .blocked-empty {
+    text-align: center; color: #888; padding: 3rem 1rem;
+    font-size: .9rem; line-height: 1.7;
+  }
+  .blocked-row {
+    display: flex; align-items: center; gap: 14px;
+    background: #171717; border: 1px solid #2a2a2a;
+    border-radius: 14px; padding: 12px 14px;
+  }
+  .blocked-avatar {
+    width: 46px; height: 46px; border-radius: 50%;
+    background: #241608; color: #e79a54;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 14px; overflow: hidden; flex-shrink: 0;
+  }
+  .blocked-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .blocked-info { flex: 1; min-width: 0; }
+  .blocked-name { color: #fff; font-weight: 700; font-size: 14px; }
+  .blocked-since { color: #888; font-size: 11px; margin-top: 2px; }
+  .blocked-unblock {
+    background: #2a2a2a; color: #fff; border: none;
+    padding: 9px 16px; border-radius: 10px;
+    font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .blocked-unblock:hover { background: #3a3a3a; }
+  .blocked-unblock:disabled { opacity: .5; cursor: not-allowed; }
+</style>
+
+<script>
+(() => {
+  'use strict';
+
+  const list = document.getElementById('blockedList');
+
+  function escapeHTML(v) {
+    return String(v ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+  }
+
+  function initials(name) {
+    const p = String(name || '?').trim().split(/\s+/).filter(Boolean);
+    return (p.length > 1 ? p[0][0] + p[p.length - 1][0] : (p[0] || '?').slice(0, 2)).toUpperCase();
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  async function load() {
+    try {
+      const res = await fetch('/api/me/blocked', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('Failed to load');
+      const users = await res.json();
+
+      if (!users.length) {
+        list.innerHTML = `
+          <div class="blocked-empty">
+            You haven't blocked anyone.<br>
+            Blocked users will appear here.
+          </div>
+        `;
+        return;
+      }
+
+      list.innerHTML = users.map(u => {
+        const avatar = u.avatar
+          ? `<img src="${escapeHTML(u.avatar)}" alt="">`
+          : escapeHTML(initials(u.name));
+        return `
+          <div class="blocked-row" data-user-id="${escapeHTML(u.id)}">
+            <div class="blocked-avatar">${avatar}</div>
+            <div class="blocked-info">
+              <div class="blocked-name">${escapeHTML(u.name)}</div>
+              <div class="blocked-since">Blocked ${escapeHTML(fmtDate(u.blocked_at))}</div>
+            </div>
+            <button class="blocked-unblock" data-unblock="${escapeHTML(u.id)}">Unblock</button>
+          </div>
+        `;
+      }).join('');
+
+    } catch (e) {
+      list.innerHTML = `<div class="blocked-empty">Could not load blocked users.</div>`;
+    }
+  }
+
+  list.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-unblock]');
+    if (!btn) return;
+    const uid = btn.dataset.unblock;
+    btn.disabled = true;
+    btn.textContent = 'Unblocking…';
+
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(uid)}/block`, {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      if (!res.ok) throw new Error();
+      // Remove the row from view
+      btn.closest('.blocked-row')?.remove();
+      if (!list.querySelector('.blocked-row')) {
+        list.innerHTML = `
+          <div class="blocked-empty">
+            You haven't blocked anyone.<br>
+            Blocked users will appear here.
+          </div>
+        `;
+      }
+
+       // Optional: tell the chat page to refresh rooms immediately
+    window.dispatchEvent(new Event('kamupus:refresh-rooms'));
+    
+    } catch {
+      btn.disabled = false;
+      btn.textContent = 'Unblock';
+      alert('Could not unblock. Try again.');
+    }
+  });
+
+  load();
+})();
+</script>
+{% endblock %}
