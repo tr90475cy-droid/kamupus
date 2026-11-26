@@ -12,3 +12,4 @@ requests==2.32.3
 Werkzeug==3.0.6
 cloudinary>=1.40.0
 Flask-Login
+better_profanity
